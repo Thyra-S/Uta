@@ -1,5 +1,5 @@
 # Uta
-A C++ Spectral Path Tracer COMING SOON
+A C++ Spectral Wavefront Path Tracer COMING SOON
 
 # Planned Features
 * Hero Wavelength Spectral Sampling
