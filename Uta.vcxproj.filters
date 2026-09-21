@@ -13,8 +13,28 @@
       <UniqueIdentifier>{67DA6AB6-F800-4c08-8B7A-83BB121AAD01}</UniqueIdentifier>
       <Extensions>rc;ico;cur;bmp;dlg;rc2;rct;bin;rgs;gif;jpg;jpeg;jpe;resx;tiff;tif;png;wav;mfcribbon-ms</Extensions>
     </Filter>
-    <Filter Include="Shader Files">
-      <UniqueIdentifier>{c5dc76b8-dfdf-4ef9-8270-69d1062aee89}</UniqueIdentifier>
-    </Filter>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="header\SpectralWavefrontPt.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="src\SpectralWavefrontPt.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <None Include=".gitignore" />
+    <None Include="shaders\common.slang" />
+    <None Include="shaders\compile.bat">
+      <Filter>Source Files</Filter>
+    </None>
+    <None Include="shaders\PrimaryRayVis.slang" />
+    <None Include="README.md" />
+    <None Include="shaders\RayGen.slang" />
+    <None Include="shaders\Intersect.slang" />
+    <None Include="shaders\Shade.slang" />
+    <None Include="shaders\Tonemap.slang" />
   </ItemGroup>
 </Project>
