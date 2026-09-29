@@ -7,7 +7,7 @@ ConstantBuffer<SceneParams> params;
 [[vk::binding(2, 0)]]
 RWStructuredBuffer<RayPayload> g_RayQueue;
 
-float3 generatePerspectiveRay(
+void generatePerspectiveRay(
     float2 uv,
     float2 lensSample,
     out float3 rayOrigin,

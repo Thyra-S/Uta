@@ -11,7 +11,11 @@
 #include <memory>
 #include <stdexcept>
 #include <vector>
+#define GLM_FORCE_DEPTH_ZERO_TO_ONE
 #include <glm/glm.hpp>
+#include <glm/gtc/matrix_transform.hpp>
+
+
 
 #define VULKAN_HPP_NO_CONSTRUCTORS
 #if defined(__INTELLISENSE__) || !defined(USE_CPP20_MODULES)
@@ -67,12 +71,77 @@ namespace WavefrontData
     {
         glm::mat4 invView;
         glm::mat4 invProj;
-        uint32_t frameCounter;
-        uint32_t currentBounce;
-        uint32_t maxBounces;
-        uint32_t totalPixels;
+
+        uint64_t  vertexBufferAddress;
+        uint64_t  indexBufferAddress;
+
+        glm::vec2 shiftOffset{ 0.0f, 0.0f };
+        glm::vec2 tiltAxis{ 0.0f, 1.0f };
+
+        float     tiltAngle{ 0.0f };
+        float     focalDistance{ 5.0f };
+        float     apertureRadius{ 0.0f };
+        uint32_t  width{ 1920 };
+
+        uint32_t  height{ 1080 };
+        uint32_t  frameCounter{ 0 };
+        uint32_t  currentBounce{ 0 };
+        uint32_t  maxBounces{ 8 };
+
+        uint32_t  totalPixels{ 1920 * 1080 };
+        uint32_t  pad0{ 0 };
+        uint32_t  pad1{ 0 };
+        uint32_t  pad2{ 0 };
+    };
+
+    struct alignas(16) GpuMeshDesc {
+        uint64_t positionBufferAddress;
+        uint64_t attributtesBufferAddress;
+        uint64_t indexBufferAddress;
+        uint32_t materialId;
+        uint32_t padding;
     };
 }
+
+struct VertexAttributes
+{
+    glm::vec3 norm;
+    glm::vec2 uv;
+};
+
+struct Camera {
+    glm::vec3 position;
+    glm::vec3 target;
+    glm::vec3 up{ 0.0f, 1.0f, 0.0f };
+    float fovY{ 45.0f }; // vertical field of view in degrees
+};
+
+struct MeshGeometry {
+    std::vector<glm::vec3> vertices;
+    std::vector<VertexAttributes> attributes;
+    std::vector<uint32_t> indices;
+
+    // Per-mesh GPU allocations
+    vk::raii::Buffer vertexBuffer = nullptr;
+    vk::raii::DeviceMemory vertexBufferMemory = nullptr;
+    vk::raii::Buffer attributeBuffer = nullptr;
+    vk::raii::DeviceMemory attributeBufferMemory = nullptr;
+    vk::raii::Buffer indexBuffer = nullptr;
+    vk::raii::DeviceMemory indexBufferMemory = nullptr;
+
+    vk::raii::Buffer blasBuffer = nullptr;
+    vk::raii::DeviceMemory blasMemory = nullptr;
+    vk::raii::AccelerationStructureKHR blas = nullptr;
+    vk::DeviceAddress blasAddress = 0;
+};
+
+struct SceneInstance {
+    uint32_t meshIndex{ 0 };
+    glm::mat4 transform{ 1.0f };
+    uint32_t customInstanceId{ 0 };
+    uint32_t materialId{ 0 };
+};
+
 
 class SpectralWavefrontPt
 {
@@ -102,17 +171,23 @@ private:
     vk::Extent2D                     swapChainExtent;
     std::vector<vk::raii::ImageView> swapChainImageViews;
 
-    /*---------- RAY QUERY & ACCELERATION STRUCTURES ----------*/
-    // Bottom Level (Geometry) and Top Level (Scene/Instances)
-    vk::raii::AccelerationStructureKHR blas = nullptr;
-    vk::raii::Buffer                   blasBuffer = nullptr;
-    vk::raii::DeviceMemory             blasMemory = nullptr;
-    uint64_t                           blasDeviceAddress = 0;
+    /*---------- SCENE GEOMETRY & ACCELERATION STRUCTURES ----------*/
+    // Bottom Level (Meshes/Instances) and Top Level (Scene/Instances)
+    Camera                              camera;
+    glm::mat4                           invView{ 1.0f };
+    glm::mat4                           invProj{ 1.0f };
 
-    vk::raii::AccelerationStructureKHR tlas = nullptr;
+    std::vector<MeshGeometry>           meshes;
+    std::vector<SceneInstance>          instances;
+    vk::raii::AccelerationStructureKHR  tlas = nullptr;
     vk::raii::Buffer                   tlasBuffer = nullptr;
     vk::raii::DeviceMemory             tlasMemory = nullptr;
     uint64_t                           tlasDeviceAddress = 0;
+
+    vk::raii::Buffer                   meshDescBuffer = nullptr;
+    vk::raii::DeviceMemory             meshDescMemory = nullptr;
+    uint64_t                           meshDescAddress = 0;
+
 
     /*---------- WAVEFRONT STORAGE BUFFERS (QUEUES) ----------*/
     // Ray queue ping-pong or active ray buffer
@@ -153,7 +228,7 @@ private:
         vk::KHRSwapchainExtensionName,
         vk::KHRRayQueryExtensionName,
         vk::KHRAccelerationStructureExtensionName,
-        vk::KHRDeferredHostOperationsExtensionName, // Prerequisite for Acceleration Structures
+        vk::KHRDeferredHostOperationsExtensionName, 
         vk::KHRBufferDeviceAddressExtensionName
     };
 
@@ -179,10 +254,25 @@ private:
     /*---------- WAVEFRONT & RAY QUERY INITIALIZATION ----------*/
     void createWavefrontQueues();
     void createAccumulationImage();
-    void createAccelerationStructuresPlaceholder();
     void createDescriptorSetLayout();
     void createDescriptorPoolAndSets();
     void createComputePipelines();
+
+    /*---------- SCENE, OBJECT, ACCELERATION STRUCTURE CREATION ----------*/
+
+    /*---------- SCENE, OBJECT, ACCELERATION STRUCTURE CREATION ----------*/
+    void createScene();
+    void createAccelerationStructures();
+    void buildBLAS(MeshGeometry& mesh);
+    void buildTLAS();
+    void buildAccelerationStructureOnGPU
+    (
+        vk::AccelerationStructureBuildGeometryInfoKHR buildInfo,
+        vk::AccelerationStructureKHR as,
+        vk::DeviceSize scratchSize,
+        uint32_t primitiveCount
+    );
+    void createMeshDescriptorBuffer();
 
     /*---------- RUNTIME ----------*/
     void createCommandPool();
