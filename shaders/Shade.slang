@@ -4,14 +4,9 @@ import Common;
 ConstantBuffer<SceneParams> params;
 
 // Set 0 Bindings
-[[vk::binding(1, 0)]]
-RWTexture2D<float4> g_AccumulationImage;
-
-[[vk::binding(2, 0)]]
-RWStructuredBuffer<RayPayload> g_RayQueue;
-
-[[vk::binding(3, 0)]]
-RWStructuredBuffer<HitPayload> g_HitQueue;
+[[vk::binding(1, 0)]] RWTexture2D<float4>            g_AccumulationImage;
+[[vk::binding(2, 0)]] RWStructuredBuffer<RayPayload> g_RayQueue;
+[[vk::binding(3, 0)]] RWStructuredBuffer<HitPayload> g_HitQueue;
 
 [shader("compute")]
 [numthreads(64, 1, 1)]
@@ -27,58 +22,57 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
     if (ray.isTerminated != 0)
         return;
 
-    uint2 pixelCoord = GetPixelCoord(ray.pixelIndex, params.width);
+    uint2 pixelCoord = uint2(ray.pixelIndex % params.width, ray.pixelIndex / params.width);
 
     // ==========================================
-    // CASE A: RAY MISSED (Sky / Environment)
+    // CASE A: RAY MISSED (Black)
     // ==========================================
     if (hit.hitStatus == 0)
     {
-        // ---------------- PSEUDOCODE: Spectral Environment ----------------
-        // 1. Evaluate sky radiance at the 4 sampled wavelengths:
-        //    float4 skyRadiance = evaluateSpectralSky(ray.direction, ray.wavelengths);
-        // 2. Deposit spectral energy:
-        //    float4 depositedLight = skyRadiance * ray.throughput;
-        // 3. Convert 4 spectral bins to CIE XYZ using color matching functions (CMF):
-        //    float3 xyz = spectralToXYZ(depositedLight, ray.wavelengths);
-        // ------------------------------------------------------------------
-        
-        float4 accumulatedColor = g_AccumulationImage[pixelCoord];
-        accumulatedColor += float4(0.2, 0.4, 0.8, 1.0); // Pseudocode: sky deposit
-        g_AccumulationImage[pixelCoord] = accumulatedColor;
-
+        g_AccumulationImage[pixelCoord] = float4(0.0, 0.0, 0.0, 1.0);
         ray.isTerminated = 1;
         g_RayQueue[rayIndex] = ray;
         return;
     }
 
     // ==========================================
-    // CASE B: RAY HIT GEOMETRY (BSDF Evaluation)
+    // CASE B: RAY HIT GEOMETRY (Normal / Solid Color)
     // ==========================================
-    
-    // ---------------- PSEUDOCODE: Material & Next Bounce ----------------
-    // 1. Fetch material at hit.instanceCustomIndex
-    // 2. If material is emissive:
-    //      deposit light * ray.throughput to g_AccumulationImage;
-    //      ray.isTerminated = 1;
-    // 3. Sample Spectral BSDF (e.g. glass with dispersion, diffuse, conductor):
-    //      float3 nextDir;
-    //      float4 bsdfWeight;
-    //      sampleBSDF(hit.normal, -ray.direction, ray.wavelengths, nextDir, bsdfWeight);
-    // 4. Russian Roulette termination based on throughput luminance
-    // --------------------------------------------------------------------
 
-    // Prepare next bounce ray state:
-    ray.origin      = hit.worldPos + hit.normal * 0.001f; // Offset along normal
-    ray.direction   = reflect(ray.direction, hit.normal); // Pseudocode direction
-    ray.throughput *= float4(0.8, 0.8, 0.8, 0.8);        // Dim throughput
-    ray.bounceCount++;
+    // Option 1: Interpolate and visualize smooth surface normal
+    GpuMeshDesc* meshDescs = (GpuMeshDesc*)params.vertexBufferAddress;
+    GpuMeshDesc mesh = meshDescs[hit.instanceCustomIndex];
 
-    if (ray.bounceCount >= params.maxBounces)
+    uint3* indices = (uint3*)mesh.indexBufferAddress;
+    uint3 tri = indices[hit.primitiveId];
+
+    VertexAttributes* attrs = (VertexAttributes*)mesh.attributtesBufferAddress;
+    VertexAttributes a0 = attrs[tri.x];
+    VertexAttributes a1 = attrs[tri.y];
+    VertexAttributes a2 = attrs[tri.z];
+
+    // Barycentric interpolation: u = hit.uv.x, v = hit.uv.y
+    float b0 = 1.0 - hit.uv.x - hit.uv.y;
+    float b1 = hit.uv.x;
+    float b2 = hit.uv.y;
+
+    float3 normal = normalize(b0 * a0.norm + b1 * a1.norm + b2 * a2.norm);
+
+    // Map normal [-1, 1] -> [0, 1] RGB
+    float3 displayColor = normal * 0.5 + 0.5;
+
+    float3 newSampleRadiance = displayColor;
+
+    // Accumulate raw sum of radiance
+    if (params.frameCounter == 0)
     {
-        ray.isTerminated = 1;
+        g_AccumulationImage[pixelCoord] = float4(newSampleRadiance, 1.0);
+    }
+    else
+    {
+        g_AccumulationImage[pixelCoord] += float4(newSampleRadiance, 0.0);
     }
 
-    // Write back to queue for the next loop iteration in C++
+    ray.isTerminated = 1;
     g_RayQueue[rayIndex] = ray;
 }

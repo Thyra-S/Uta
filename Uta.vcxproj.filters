@@ -23,6 +23,12 @@
     <ClCompile Include="src\SpectralWavefrontPt.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="src\Main.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="src\ObjectLoading.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <None Include=".gitignore" />
@@ -36,5 +42,6 @@
     <None Include="shaders\Intersect.slang" />
     <None Include="shaders\Shade.slang" />
     <None Include="shaders\Tonemap.slang" />
+    <None Include="shaders\OpenPBRMat.slang" />
   </ItemGroup>
 </Project>

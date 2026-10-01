@@ -4,14 +4,9 @@ import Common;
 ConstantBuffer<SceneParams> params;
 
 // Set 0 Bindings
-[[vk::binding(0, 0)]]
-RaytracingAccelerationStructure g_TLAS;
-
-[[vk::binding(2, 0)]]
-RWStructuredBuffer<RayPayload> g_RayQueue;
-
-[[vk::binding(3, 0)]]
-RWStructuredBuffer<HitPayload> g_HitQueue;
+[[vk::binding(0, 0)]] RaytracingAccelerationStructure g_TLAS;
+[[vk::binding(2, 0)]] RWStructuredBuffer<RayPayload>  g_RayQueue;
+[[vk::binding(3, 0)]] RWStructuredBuffer<HitPayload>  g_HitQueue;
 
 [shader("compute")]
 [numthreads(64, 1, 1)]
@@ -23,17 +18,17 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
 
     RayPayload ray = g_RayQueue[rayIndex];
 
-    HitPayload hit;
-    hit.hitStatus = 0; // Default: Miss
+    // Zero-initialize hit payload (hitStatus = 0 defaults to Miss/Environment)
+    HitPayload hit = (HitPayload)0;
 
-    // If ray was terminated on previous bounce, skip expensive traversal
+    // Skip inactive or terminated rays
     if (ray.isTerminated != 0)
     {
         g_HitQueue[rayIndex] = hit;
         return;
     }
 
-    // 1. Pack into RayDesc
+    // 1. Setup ray descriptor
     RayDesc rayDesc;
     rayDesc.Origin    = ray.origin;
     rayDesc.Direction = ray.direction;
@@ -46,25 +41,19 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
 
     while (query.Proceed())
     {
-        // Traversal handled by RT cores
+        // Traversal handled by hardware RT cores
     }
 
-    // 3. Populate Hit Queue based on result
+    // 3. Populate Hit Queue
     if (query.CommittedStatus() == COMMITTED_TRIANGLE_HIT)
     {
-        hit.hitStatus             = 1; // Hit
-        hit.instanceCustomIndex   = query.CommittedInstanceID();
+        hit.hitStatus             = 1;
+        // CommittedInstanceIndex() gives 0-based instance index matching meshDescBuffer
+        hit.instanceCustomIndex   = query.CommittedInstanceIndex();
         hit.primitiveId           = query.CommittedPrimitiveIndex();
-        hit.uv                    = query.CommittedTriangleBarycentrics();
-        
-        // Compute hit position: Origin + Direction * HitDistance
+        hit.uv                    = query.CommittedTriangleBarycentrics(); // float2 (u, v)
         hit.worldPos              = ray.origin + ray.direction * query.CommittedRayT();
-
-        // ---------------- PSEUDOCODE: Geometric Normal ----------------
-        // In full engine: fetch vertices from storage buffer using primitiveId,
-        // compute cross product of triangle edges for geometric normal
-        hit.normal                = float3(0, 1, 0); 
-        // -------------------------------------------------------------
+        hit.normal                = float3(0.0, 0.0, 0.0); // Resolved in Shade.slang
     }
 
     g_HitQueue[rayIndex] = hit;

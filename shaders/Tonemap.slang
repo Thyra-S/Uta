@@ -1,37 +1,10 @@
-// Tonemap.slang
-struct SceneParams
-{
-    float4x4 invView;
-    float4x4 invProj;
-
-    uint64_t vertexBufferAddress;
-    uint64_t indexBufferAddress;
-
-    float2 shiftOffset;
-    float2 tiltAxis;
-
-    float tiltAngle;
-    float focalDistance;
-    float apertureRadius;
-    uint width;
-
-    uint height;
-    uint frameCounter;
-    uint currentBounce;
-    uint maxBounces;
-
-    uint totalPixels;
-    uint pad0;
-    uint pad1;
-    uint pad2;
-};
+import Common;
 
 [[vk::push_constant]]
-SceneParams params;
+ConstantBuffer<SceneParams> params;
 
-// Binding 1: Offscreen HDR Accumulation Image (RW Storage Image)
-[[vk::binding(1, 0)]]
-RWTexture2D<float4> accumulationImage;
+[[vk::binding(1, 0)]] RWTexture2D<float4> g_AccumulationImage;
+[[vk::binding(4, 0)]] RWTexture2D<float4> g_ResolvedImage;
 
 [shader("compute")]
 [numthreads(16, 16, 1)]
@@ -42,12 +15,18 @@ void main(uint3 id : SV_DispatchThreadID)
 
     int2 pixelCoord = int2(id.xy);
 
-    // Read stored HDR / accumulated spectral radiance
-    float4 rawColor = accumulationImage[pixelCoord];
+    // 1. Fetch raw accumulated sum
+    float3 sumRadiance = g_AccumulationImage[pixelCoord].rgb;
 
-    // --- TODO: Implement Spectral/XYZ -> sRGB conversion, tonemapping curve, gamma correction ---
-    float4 tonemappedColor = rawColor;
+    // 2. Compute sample mean
+    float totalSamples = max(1.0, float(params.frameCounter + 1));
+    float3 linearColor = sumRadiance / totalSamples;
 
-    // Write back in-place before the swapchain blit pass
-    accumulationImage[pixelCoord] = tonemappedColor;
+    // 3. Tonemapping (Reinhard)
+    float3 mapped = linearColor / (linearColor + float3(1.0, 1.0, 1.0));
+
+    // 4. Gamma Correction (Linear -> sRGB approximation)
+    float3 srgb = pow(max(mapped, float3(0.0, 0.0, 0.0)), float3(1.0 / 2.2));
+
+    g_ResolvedImage[pixelCoord] = float4(srgb, 1.0);
 }

@@ -101,6 +101,77 @@ namespace WavefrontData
         uint32_t materialId;
         uint32_t padding;
     };
+
+    namespace WavefrontData
+    {
+        struct alignas(16) GpuOpenPbrMaterial
+        {
+            /* ------------------BASE LOBE------------------ */
+            // Polynomial coeffs (c0, c1, c2, scale)
+            glm::vec4 baseColorCoeffs{ 1.0f, 1.0f, 1.0f, 1.0f };
+
+            // Packed 16-byte block (4 x 32-bit floats)
+            float     baseWeight{ 1.0f };
+            float     baseRoughness{ 0.3f };
+            float     baseMetalness{ 0.0f };
+            float     baseDiffuseRoughness{ 0.0f };
+
+            /* ------------------ SPECULAR LOBE ------------------ */
+            // Dielectric tint or Conductor edge tint (c0, c1, c2, scale)
+            glm::vec4 specularColorCoeffs{ 1.0f, 1.0f, 1.0f, 1.0f };
+
+            // Packed 16-byte block (4 x 32-bit floats)
+            float     specularWeight{ 1.0f };
+            float     specularRoughness{ 0.3f };
+            float     specularIor{ 1.5f };
+            float     specularRoughnessAnisotropy{ 0.0f };
+
+            /* ------------------TRANSMISSION LOBE------------------ */
+            glm::vec4 transmissionColorCoeffs{ 1.0f, 1.0f, 1.0f, 1.0f };
+
+            // xyz = scatter coeffs, w = dispersion (Sellmeier / Abbe v)
+            glm::vec4 transmissionScatterAndDispersion{ 0.0f, 0.0f, 0.0f, 0.0f };
+
+            float     transmissionWeight{ 0.0f };
+            float     transmissionDepth{ 0.0f };
+            float     padTrans0{ 0.0f };
+            float     padTrans1{ 0.0f };
+
+            /* ------------------SUBSURFACE LOBE------------------ */
+            // xyz = subsurface color coeffs / tint, w = weight
+            glm::vec4 subsurfaceColorAndWeight{ 0.8f, 0.8f, 0.8f, 0.0f };
+
+            // xyz = mean free path / radius, w = scale
+            glm::vec4 subsurfaceRadiusAndScale{ 1.0f, 1.0f, 1.0f, 1.0f };
+
+            /* ------------------COAT LOBE------------------ */
+            // xyz = coat tint coeffs / tint, w = darkening
+            glm::vec4 coatColorAndDarkening{ 1.0f, 1.0f, 1.0f, 1.0f };
+
+            float     coatWeight{ 0.0f };
+            float     coatRoughness{ 0.05f };
+            float     coatIor{ 1.6f };
+            float     padCoat{ 0.0f };
+
+            /* ------------------ EMISSION & GEOMETRY ------------------ */
+            // xyz = emission color/spectrum, w = luminance (nits / cd/m^2)
+            glm::vec4 emissionAndLuminance{ 0.0f, 0.0f, 0.0f, 0.0f };
+
+            // Packed texture map bindings (4 x uint32_t = 16 bytes)
+            uint32_t  baseColorTexId{ ~0u };
+            uint32_t  specularRoughnessTexId{ ~0u };
+            uint32_t  coatRoughnessTexId{ ~0u };
+            uint32_t  normalTexId{ ~0u };
+
+            // Geometry flags and final 16-byte alignment padding
+            uint32_t  thinWalled{ 0 };
+            uint32_t  pad0{ 0 };
+            uint32_t  pad1{ 0 };
+            uint32_t  pad2{ 0 };
+        };
+
+        static_assert(sizeof(GpuOpenPbrMaterial) % 16 == 0, "Material struct must be a multiple of 16 bytes");
+    }
 }
 
 struct VertexAttributes
@@ -146,7 +217,7 @@ struct SceneInstance {
 class SpectralWavefrontPt
 {
 public:
-    void run();
+    void run(const std::string& modelPath, const std::string& materialPath);
 
 private:
     /*---------- WINDOW & CONTEXT ----------*/
@@ -154,6 +225,7 @@ private:
     const uint32_t WIDTH = 1920;
     const uint32_t HEIGHT = 1080;
     uint32_t frameIndex = 0;
+    uint32_t totalSamplesAccumulated = 0;
 
     vk::raii::Context                 context;
     vk::raii::Instance                instance = nullptr;
@@ -198,10 +270,16 @@ private:
     vk::raii::Buffer                   hitQueueBuffer = nullptr;
     vk::raii::DeviceMemory             hitQueueMemory = nullptr;
 
+    /*---------- OFFSCREEN ACCUMULATION & WAVEFRONT QUEUES ----------*/
     // Offscreen 32-bit floating point accumulation image (Spectral/XYZ radiance)
     vk::raii::Image                    accumulationImage = nullptr;
     vk::raii::DeviceMemory             accumulationImageMemory = nullptr;
     vk::raii::ImageView                accumulationImageView = nullptr;
+
+    // Intermediate 8-bit SDR resolved image for tonemapped display & blit
+    vk::raii::Image                    resolvedImage = nullptr;
+    vk::raii::DeviceMemory             resolvedImageMemory = nullptr;
+    vk::raii::ImageView                resolvedImageView = nullptr;
 
     /*---------- DESCRIPTORS ----------*/
     vk::raii::DescriptorSetLayout      descriptorSetLayout = nullptr;
@@ -240,7 +318,7 @@ private:
 
     /*---------- CORE SETUP PIPELINE ----------*/
     void initWindow();
-    void initVulkan();
+    void initVulkan(const std::string& modelPath, const std::string& materialPath);
     void createInstance();
     std::vector<const char*> getRequiredInstanceExtensions();
     void setupDebugMessenger();
@@ -254,14 +332,13 @@ private:
     /*---------- WAVEFRONT & RAY QUERY INITIALIZATION ----------*/
     void createWavefrontQueues();
     void createAccumulationImage();
+    void createResolvedImage();
     void createDescriptorSetLayout();
     void createDescriptorPoolAndSets();
     void createComputePipelines();
 
     /*---------- SCENE, OBJECT, ACCELERATION STRUCTURE CREATION ----------*/
-
-    /*---------- SCENE, OBJECT, ACCELERATION STRUCTURE CREATION ----------*/
-    void createScene();
+    void createScene(const std::string& modelPath, const std::string& materialPath);
     void createAccelerationStructures();
     void buildBLAS(MeshGeometry& mesh);
     void buildTLAS();

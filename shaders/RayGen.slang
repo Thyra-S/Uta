@@ -62,10 +62,10 @@ float4 generateWavelengths(float hero, float2 spectrum)
     float step = (span / 4);
 
     float4 wavelengths;
-    wavelengths.x = fmod(hero - spectrum.x + step, span) + spectrum.x;
-    wavelengths.y = fmod(hero - spectrum.x + 2.0f * step, span) + spectrum.x;
-    wavelengths.z = fmod(hero - spectrum.x + 3.0f * step, span) + spectrum.x;
-    wavelengths.w = fmod(hero - spectrum.x + 4.0f * step, span) + spectrum.x;
+    wavelengths.x = hero;
+    wavelengths.y = fmod(hero - spectrum.x + 1.0f * step, span) + spectrum.x;
+    wavelengths.z = fmod(hero - spectrum.x + 2.0f * step, span) + spectrum.x;
+    wavelengths.w = fmod(hero - spectrum.x + 3.0f * step, span) + spectrum.x;
     return wavelengths;
 }
 

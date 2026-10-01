@@ -1,9 +1,9 @@
 #include "SpectralWavefrontPt.h"
 
-void SpectralWavefrontPt::run()
+void SpectralWavefrontPt::run(const std::string& modelPath, const std::string& materialPath)
 {
     initWindow();
-    initVulkan();
+    initVulkan(modelPath, materialPath);
     mainLoop();
     cleanup();
 }
@@ -16,7 +16,7 @@ void SpectralWavefrontPt::initWindow()
     window = glfwCreateWindow(WIDTH, HEIGHT, "Vulkan Spectral Wavefront Path Tracer (vk_ray_query)", nullptr, nullptr);
 }
 
-void SpectralWavefrontPt::initVulkan()
+void SpectralWavefrontPt::initVulkan(const std::string& modelPath, const std::string& materialPath)
 {
     createInstance();
     setupDebugMessenger();
@@ -29,8 +29,9 @@ void SpectralWavefrontPt::initVulkan()
 
     // Wavefront Data Infrastructure
     createAccumulationImage();
+    createResolvedImage();
     createWavefrontQueues();
-    createScene();
+    createScene(modelPath, materialPath);
     createAccelerationStructures();
     createMeshDescriptorBuffer();
 
@@ -132,7 +133,7 @@ bool SpectralWavefrontPt::isDeviceSuitable(const vk::raii::PhysicalDevice& pDevi
         vk::PhysicalDeviceRayQueryFeaturesKHR,
         vk::PhysicalDeviceAccelerationStructureFeaturesKHR>();
 
-    bool int64Supported = features2.template get < vk::PhysicalDeviceFeatures2().features.shaderInt64;
+    bool int64Supported = features2.template get <vk::PhysicalDeviceFeatures2>().features.shaderInt64;
     bool bdaSupported      = features2.template get<vk::PhysicalDeviceVulkan12Features>().bufferDeviceAddress;
     bool scalarSupported   = features2.template get<vk::PhysicalDeviceVulkan12Features>().scalarBlockLayout;
     bool sync2Supported    = features2.template get<vk::PhysicalDeviceVulkan13Features>().synchronization2;
@@ -202,7 +203,8 @@ void SpectralWavefrontPt::createLogicalDevice()
 void SpectralWavefrontPt::createAccumulationImage()
 {
     // Accumulation requires 32-bit floating point precision per channel to integrate spectral radiance
-    vk::ImageCreateInfo imageInfo{
+    vk::ImageCreateInfo imageInfo
+    {
         .imageType = vk::ImageType::e2D,
         .format = vk::Format::eR32G32B32A32Sfloat,
         .extent = { WIDTH, HEIGHT, 1 },
@@ -218,14 +220,16 @@ void SpectralWavefrontPt::createAccumulationImage()
     accumulationImage = vk::raii::Image(device, imageInfo);
     auto memReq = accumulationImage.getMemoryRequirements();
 
-    vk::MemoryAllocateInfo allocInfo{
+    vk::MemoryAllocateInfo allocInfo
+    {
         .allocationSize = memReq.size,
         .memoryTypeIndex = findMemoryType(memReq.memoryTypeBits, vk::MemoryPropertyFlagBits::eDeviceLocal)
     };
     accumulationImageMemory = vk::raii::DeviceMemory(device, allocInfo);
     accumulationImage.bindMemory(*accumulationImageMemory, 0);
 
-    vk::ImageViewCreateInfo viewInfo{
+    vk::ImageViewCreateInfo viewInfo
+    {
         .image = *accumulationImage,
         .viewType = vk::ImageViewType::e2D,
         .format = vk::Format::eR32G32B32A32Sfloat,
@@ -234,7 +238,8 @@ void SpectralWavefrontPt::createAccumulationImage()
     accumulationImageView = vk::raii::ImageView(device, viewInfo);
 
     // One-time command buffer: transition eUndefined -> eGeneral and clear image to 0
-    vk::CommandBufferAllocateInfo cmdAllocInfo{
+    vk::CommandBufferAllocateInfo cmdAllocInfo
+    {
         .commandPool = *commandPool,
         .level = vk::CommandBufferLevel::ePrimary,
         .commandBufferCount = 1
@@ -244,7 +249,8 @@ void SpectralWavefrontPt::createAccumulationImage()
 
     cmd.begin({ .flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit });
 
-    vk::ImageMemoryBarrier2 initBarrier{
+    vk::ImageMemoryBarrier2 initBarrier
+    {
         .srcStageMask = vk::PipelineStageFlagBits2::eNone,
         .srcAccessMask = vk::AccessFlagBits2::eNone,
         .dstStageMask = vk::PipelineStageFlagBits2::eTransfer,
@@ -260,7 +266,8 @@ void SpectralWavefrontPt::createAccumulationImage()
     vk::ImageSubresourceRange range{ vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1 };
     cmd.clearColorImage(*accumulationImage, vk::ImageLayout::eTransferDstOptimal, clearColor, range);
 
-    vk::ImageMemoryBarrier2 toGeneralBarrier{
+    vk::ImageMemoryBarrier2 toGeneralBarrier
+    {
         .srcStageMask = vk::PipelineStageFlagBits2::eTransfer,
         .srcAccessMask = vk::AccessFlagBits2::eTransferWrite,
         .dstStageMask = vk::PipelineStageFlagBits2::eComputeShader,
@@ -271,6 +278,73 @@ void SpectralWavefrontPt::createAccumulationImage()
         .subresourceRange = range
     };
     cmd.pipelineBarrier2(vk::DependencyInfo{ .imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &toGeneralBarrier });
+
+    cmd.end();
+
+    vk::SubmitInfo submitInfo{ .commandBufferCount = 1, .pCommandBuffers = &*cmd };
+    computeAndGraphicsQueue.submit(submitInfo, nullptr);
+    computeAndGraphicsQueue.waitIdle();
+}
+
+void SpectralWavefrontPt::createResolvedImage()
+{
+    vk::ImageCreateInfo imageInfo
+    {
+        .imageType = vk::ImageType::e2D,
+        .format = vk::Format::eR8G8B8A8Unorm,
+        .extent = { WIDTH, HEIGHT, 1 },
+        .mipLevels = 1,
+        .arrayLayers = 1,
+        .samples = vk::SampleCountFlagBits::e1,
+        .tiling = vk::ImageTiling::eOptimal,
+        .usage = vk::ImageUsageFlagBits::eStorage | vk::ImageUsageFlagBits::eTransferSrc,
+        .sharingMode = vk::SharingMode::eExclusive
+    };
+
+    resolvedImage = vk::raii::Image(device, imageInfo);
+    auto memReq = resolvedImage.getMemoryRequirements();
+
+    vk::MemoryAllocateInfo allocInfo
+    {
+        .allocationSize = memReq.size,
+        .memoryTypeIndex = findMemoryType(memReq.memoryTypeBits, vk::MemoryPropertyFlagBits::eDeviceLocal)
+    };
+    resolvedImageMemory = vk::raii::DeviceMemory(device, allocInfo);
+    resolvedImage.bindMemory(*resolvedImageMemory, 0);
+
+    vk::ImageViewCreateInfo viewInfo
+    {
+        .image = *resolvedImage,
+        .viewType = vk::ImageViewType::e2D,
+        .format = vk::Format::eR8G8B8A8Unorm,
+        .subresourceRange = { vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1 }
+    };
+    resolvedImageView = vk::raii::ImageView(device, viewInfo);
+
+    // Transition eUndefined -> eGeneral
+    vk::CommandBufferAllocateInfo cmdAllocInfo
+    {
+        .commandPool = *commandPool,
+        .level = vk::CommandBufferLevel::ePrimary,
+        .commandBufferCount = 1
+    };
+    vk::raii::CommandBuffers cmds(device, cmdAllocInfo);
+    auto& cmd = cmds[0];
+
+    cmd.begin({ .flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit });
+
+    vk::ImageMemoryBarrier2 barrier
+    {
+        .srcStageMask = vk::PipelineStageFlagBits2::eNone,
+        .srcAccessMask = vk::AccessFlagBits2::eNone,
+        .dstStageMask = vk::PipelineStageFlagBits2::eComputeShader,
+        .dstAccessMask = vk::AccessFlagBits2::eShaderStorageWrite,
+        .oldLayout = vk::ImageLayout::eUndefined,
+        .newLayout = vk::ImageLayout::eGeneral,
+        .image = *resolvedImage,
+        .subresourceRange = { vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1 }
+    };
+    cmd.pipelineBarrier2(vk::DependencyInfo{ .imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &barrier });
 
     cmd.end();
 
@@ -311,7 +385,7 @@ void SpectralWavefrontPt::createWavefrontQueues()
 
 /*---------- SCENE, OBJECT, ACCELERATION STRUCTURE CREATION ----------*/
 
-void SpectralWavefrontPt::createScene()
+void SpectralWavefrontPt::createScene(const std::string& modelPath, const std::string& materialPath)
 {
     meshes.clear();
     instances.clear();
@@ -329,7 +403,7 @@ void SpectralWavefrontPt::createScene()
         1000.0f
     );
 
-    proj[1][1] *= -1.0f;
+    //proj[1][1] *= -1.0f;
 
     invView = glm::inverse(view);
     invProj = glm::inverse(proj);
@@ -750,9 +824,10 @@ void SpectralWavefrontPt::createDescriptorSetLayout()
     // Binding 1: Offscreen HDR Accumulation Image (RW Storage Image)
     // Binding 2: Ray Queue (SSBO)
     // Binding 3: Hit Queue (SSBO)
-    std::array<vk::DescriptorSetLayoutBinding, 4> bindings{ {
+    // Binding 4: Resolved SDR Image (RW Storage Image)
+    std::array<vk::DescriptorSetLayoutBinding, 5> bindings{ {
         {
-            .binding = 0,
+            .binding = 0,\
             .descriptorType = vk::DescriptorType::eAccelerationStructureKHR,
             .descriptorCount = 1,
             .stageFlags = vk::ShaderStageFlagBits::eCompute
@@ -774,23 +849,31 @@ void SpectralWavefrontPt::createDescriptorSetLayout()
             .descriptorType = vk::DescriptorType::eStorageBuffer,
             .descriptorCount = 1,
             .stageFlags = vk::ShaderStageFlagBits::eCompute
+        },
+        {
+            .binding = 4,
+            .descriptorType = vk::DescriptorType::eStorageImage,
+            .descriptorCount = 1,
+            .stageFlags = vk::ShaderStageFlagBits::eCompute
         }
     } };
 
-    vk::DescriptorSetLayoutCreateInfo layoutInfo{
+    vk::DescriptorSetLayoutCreateInfo layoutInfo
+    {
         .bindingCount = static_cast<uint32_t>(bindings.size()),
         .pBindings = bindings.data()
     };
     descriptorSetLayout = vk::raii::DescriptorSetLayout(device, layoutInfo);
 
-    // Global Push Constants
-    vk::PushConstantRange pushConstantRange{
+    vk::PushConstantRange pushConstantRange
+    {
         .stageFlags = vk::ShaderStageFlagBits::eCompute,
         .offset = 0,
         .size = sizeof(WavefrontData::SceneParams)
     };
 
-    vk::PipelineLayoutCreateInfo pipelineLayoutInfo{
+    vk::PipelineLayoutCreateInfo pipelineLayoutInfo
+    {
         .setLayoutCount = 1,
         .pSetLayouts = &*descriptorSetLayout,
         .pushConstantRangeCount = 1,
@@ -801,13 +884,15 @@ void SpectralWavefrontPt::createDescriptorSetLayout()
 
 void SpectralWavefrontPt::createDescriptorPoolAndSets()
 {
-    std::array<vk::DescriptorPoolSize, 3> poolSizes{ {
+    std::array<vk::DescriptorPoolSize, 3> poolSizes
+    { {
         { vk::DescriptorType::eAccelerationStructureKHR, 1 },
-        { vk::DescriptorType::eStorageImage, 1 },
+        { vk::DescriptorType::eStorageImage, 2 },
         { vk::DescriptorType::eStorageBuffer, 2 }
     } };
 
-    vk::DescriptorPoolCreateInfo poolInfo{
+    vk::DescriptorPoolCreateInfo poolInfo
+    {
         .flags = vk::DescriptorPoolCreateFlagBits::eFreeDescriptorSet,
         .maxSets = 1,
         .poolSizeCount = static_cast<uint32_t>(poolSizes.size()),
@@ -815,7 +900,8 @@ void SpectralWavefrontPt::createDescriptorPoolAndSets()
     };
     descriptorPool = vk::raii::DescriptorPool(device, poolInfo);
 
-    vk::DescriptorSetAllocateInfo allocInfo{
+    vk::DescriptorSetAllocateInfo allocInfo
+    {
         .descriptorPool = *descriptorPool,
         .descriptorSetCount = 1,
         .pSetLayouts = &*descriptorSetLayout
@@ -823,28 +909,38 @@ void SpectralWavefrontPt::createDescriptorPoolAndSets()
     descriptorSets = vk::raii::DescriptorSets(device, allocInfo);
 
     // Acceleration structure write descriptor
-    vk::WriteDescriptorSetAccelerationStructureKHR asInfo{
+    vk::WriteDescriptorSetAccelerationStructureKHR asInfo
+    {
         .accelerationStructureCount = 1,
         .pAccelerationStructures = &*tlas
     };
 
     // Bind Buffers and Images to Descriptor Sets
-    vk::DescriptorImageInfo accumImageInfo{
+    vk::DescriptorImageInfo accumImageInfo
+    {
         .imageView = *accumulationImageView,
         .imageLayout = vk::ImageLayout::eGeneral
     };
-    vk::DescriptorBufferInfo rayBufferInfo{
+    vk::DescriptorImageInfo resolvedImageInfo
+    {
+        .imageView = *resolvedImageView,
+        .imageLayout = vk::ImageLayout::eGeneral
+    };
+    vk::DescriptorBufferInfo rayBufferInfo
+    {
         .buffer = *rayQueueBuffer,
         .offset = 0,
         .range = VK_WHOLE_SIZE
     };
-    vk::DescriptorBufferInfo hitBufferInfo{
+    vk::DescriptorBufferInfo hitBufferInfo
+    {
         .buffer = *hitQueueBuffer,
         .offset = 0,
         .range = VK_WHOLE_SIZE
     };
 
-    std::array<vk::WriteDescriptorSet, 4> descriptorWrites{ {
+    std::array<vk::WriteDescriptorSet, 5> descriptorWrites
+    { {
         {
             .pNext = &asInfo,
             .dstSet = *descriptorSets[0],
@@ -873,6 +969,13 @@ void SpectralWavefrontPt::createDescriptorPoolAndSets()
             .descriptorCount = 1,
             .descriptorType = vk::DescriptorType::eStorageBuffer,
             .pBufferInfo = &hitBufferInfo
+        },
+        {
+            .dstSet = *descriptorSets[0],
+            .dstBinding = 4,
+            .descriptorCount = 1,
+            .descriptorType = vk::DescriptorType::eStorageImage,
+            .pImageInfo = &resolvedImageInfo
         }
     } };
 
@@ -923,7 +1026,7 @@ void SpectralWavefrontPt::recordWavefrontCommands(uint32_t imageIndex)
         .apertureRadius = 0.0f,
         .width = WIDTH,
         .height = HEIGHT,
-        .frameCounter = frameIndex,
+        .frameCounter = totalSamplesAccumulated,
         .currentBounce = 0,
         .maxBounces = 8,
         .totalPixels = WIDTH * HEIGHT
@@ -1002,6 +1105,7 @@ void SpectralWavefrontPt::recordWavefrontCommands(uint32_t imageIndex)
     // --- PHASE 4: COMPOSITE / TONEMAP & PRESENTATION ---
     // In a production engine, blit or run a final tone-mapping compute pass converting XYZ to sRGB onto swapChainImages[imageIndex]
 
+    
     // 1. Run Tone Mapping & XYZ->RGB Conversion Pass
     if (*pipelineTonemap) 
     {
@@ -1010,20 +1114,18 @@ void SpectralWavefrontPt::recordWavefrontCommands(uint32_t imageIndex)
         cmd.dispatch(workgroupsX, workgroupsY, 1);
     }
 
-    vk::ImageMemoryBarrier2 accumToSrcBarrier
-    {
+    vk::ImageMemoryBarrier2 resolvedToSrcBarrier{
         .srcStageMask = vk::PipelineStageFlagBits2::eComputeShader,
         .srcAccessMask = vk::AccessFlagBits2::eShaderStorageWrite,
         .dstStageMask = vk::PipelineStageFlagBits2::eTransfer,
         .dstAccessMask = vk::AccessFlagBits2::eTransferRead,
         .oldLayout = vk::ImageLayout::eGeneral,
         .newLayout = vk::ImageLayout::eTransferSrcOptimal,
-        .image = *accumulationImage,
+        .image = *resolvedImage,
         .subresourceRange = { vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1 }
     };
 
-    vk::ImageMemoryBarrier2 swapchainToDstBarrier
-    {
+    vk::ImageMemoryBarrier2 swapchainToDstBarrier{
         .srcStageMask = vk::PipelineStageFlagBits2::eColorAttachmentOutput,
         .srcAccessMask = vk::AccessFlagBits2::eNone,
         .dstStageMask = vk::PipelineStageFlagBits2::eTransfer,
@@ -1034,16 +1136,14 @@ void SpectralWavefrontPt::recordWavefrontCommands(uint32_t imageIndex)
         .subresourceRange = { vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1 }
     };
 
-    std::array<vk::ImageMemoryBarrier2, 2> preBlitBarriers = { accumToSrcBarrier, swapchainToDstBarrier };
-    cmd.pipelineBarrier2(vk::DependencyInfo
-        {
+    std::array<vk::ImageMemoryBarrier2, 2> preBlitBarriers = { resolvedToSrcBarrier, swapchainToDstBarrier };
+    cmd.pipelineBarrier2(vk::DependencyInfo{
         .imageMemoryBarrierCount = static_cast<uint32_t>(preBlitBarriers.size()),
         .pImageMemoryBarriers = preBlitBarriers.data()
         });
 
-    // 3. Blit from HDR Float Accumulation Image to SDR sRGB Swapchain Image
-    vk::ImageBlit blitRegion
-    {
+    // 4. Blit from SDR resolvedImage to swapchain image
+    vk::ImageBlit blitRegion{
         .srcSubresource = { vk::ImageAspectFlagBits::eColor, 0, 0, 1 },
         .srcOffsets = {{
             vk::Offset3D{ 0, 0, 0 },
@@ -1057,14 +1157,26 @@ void SpectralWavefrontPt::recordWavefrontCommands(uint32_t imageIndex)
     };
 
     cmd.blitImage(
-        *accumulationImage, vk::ImageLayout::eTransferSrcOptimal,
+        *resolvedImage, vk::ImageLayout::eTransferSrcOptimal,
         swapChainImages[imageIndex], vk::ImageLayout::eTransferDstOptimal,
         { blitRegion }, vk::Filter::eNearest
     );
 
-    // 4. Transition Swapchain: Transfer Dst -> Present Src
-    vk::ImageMemoryBarrier2 swapchainToPresentBarrier
-    {
+    // 5. Post-Blit Barriers:
+    //    resolvedImage: eTransferSrcOptimal -> eGeneral (ready for next frame)
+    //    swapChainImages[imageIndex]: eTransferDstOptimal -> ePresentSrcKHR
+    vk::ImageMemoryBarrier2 restoreResolvedBarrier{
+        .srcStageMask = vk::PipelineStageFlagBits2::eTransfer,
+        .srcAccessMask = vk::AccessFlagBits2::eTransferRead,
+        .dstStageMask = vk::PipelineStageFlagBits2::eComputeShader,
+        .dstAccessMask = vk::AccessFlagBits2::eShaderStorageWrite,
+        .oldLayout = vk::ImageLayout::eTransferSrcOptimal,
+        .newLayout = vk::ImageLayout::eGeneral,
+        .image = *resolvedImage,
+        .subresourceRange = { vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1 }
+    };
+
+    vk::ImageMemoryBarrier2 swapchainToPresentBarrier{
         .srcStageMask = vk::PipelineStageFlagBits2::eTransfer,
         .srcAccessMask = vk::AccessFlagBits2::eTransferWrite,
         .dstStageMask = vk::PipelineStageFlagBits2::eColorAttachmentOutput,
@@ -1075,22 +1187,8 @@ void SpectralWavefrontPt::recordWavefrontCommands(uint32_t imageIndex)
         .subresourceRange = { vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1 }
     };
 
-    // 5. Restore Accumulation Image: Transfer Src -> General (for the next frame)
-    vk::ImageMemoryBarrier2 restoreAccumBarrier
-    {
-        .srcStageMask = vk::PipelineStageFlagBits2::eTransfer,
-        .srcAccessMask = vk::AccessFlagBits2::eTransferRead,
-        .dstStageMask = vk::PipelineStageFlagBits2::eComputeShader,
-        .dstAccessMask = vk::AccessFlagBits2::eShaderStorageWrite,
-        .oldLayout = vk::ImageLayout::eTransferSrcOptimal,
-        .newLayout = vk::ImageLayout::eGeneral,
-        .image = *accumulationImage,
-        .subresourceRange = { vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1 }
-    };
-
-    std::array<vk::ImageMemoryBarrier2, 2> postBlitBarriers = { restoreAccumBarrier, swapchainToPresentBarrier };
-    cmd.pipelineBarrier2(vk::DependencyInfo
-        {
+    std::array<vk::ImageMemoryBarrier2, 2> postBlitBarriers = { restoreResolvedBarrier, swapchainToPresentBarrier };
+    cmd.pipelineBarrier2(vk::DependencyInfo{
         .imageMemoryBarrierCount = static_cast<uint32_t>(postBlitBarriers.size()),
         .pImageMemoryBarriers = postBlitBarriers.data()
         });
@@ -1165,11 +1263,20 @@ void SpectralWavefrontPt::createCommandBuffers()
 
 void SpectralWavefrontPt::createSyncObjects()
 {
+    presentCompleteSemaphores.clear();
+    renderFinishedSemaphores.clear();
+    inFlightFences.clear();
+
     for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) 
     {
         presentCompleteSemaphores.emplace_back(device, vk::SemaphoreCreateInfo{});
         renderFinishedSemaphores.emplace_back(device, vk::SemaphoreCreateInfo{});
         inFlightFences.emplace_back(device, vk::FenceCreateInfo{ .flags = vk::FenceCreateFlagBits::eSignaled });
+    }
+
+    for (size_t i = 0; i < swapChainImages.size(); i++)
+    {
+        renderFinishedSemaphores.emplace_back(device, vk::SemaphoreCreateInfo{});
     }
 }
 
@@ -1184,27 +1291,30 @@ void SpectralWavefrontPt::drawFrame()
     recordWavefrontCommands(imageIndex);
 
     vk::PipelineStageFlags waitMask(vk::PipelineStageFlagBits::eComputeShader);
-    vk::SubmitInfo submitInfo{
+    vk::SubmitInfo submitInfo
+    {
         .waitSemaphoreCount = 1,
         .pWaitSemaphores = &*presentCompleteSemaphores[frameIndex],
         .pWaitDstStageMask = &waitMask,
         .commandBufferCount = 1,
         .pCommandBuffers = &*commandBuffers[frameIndex],
         .signalSemaphoreCount = 1,
-        .pSignalSemaphores = &*renderFinishedSemaphores[frameIndex]
+        .pSignalSemaphores = &*renderFinishedSemaphores[imageIndex]
     };
 
     computeAndGraphicsQueue.submit(submitInfo, *inFlightFences[frameIndex]);
 
-    vk::PresentInfoKHR presentInfo{
+    vk::PresentInfoKHR presentInfo
+    {
         .waitSemaphoreCount = 1,
-        .pWaitSemaphores = &*renderFinishedSemaphores[frameIndex],
+        .pWaitSemaphores = &*renderFinishedSemaphores[imageIndex],
         .swapchainCount = 1,
         .pSwapchains = &*swapChain,
         .pImageIndices = &imageIndex
     };
 
     result = computeAndGraphicsQueue.presentKHR(presentInfo);
+    totalSamplesAccumulated++;
     frameIndex = (frameIndex + 1) % MAX_FRAMES_IN_FLIGHT;
 }
 
@@ -1268,6 +1378,7 @@ void SpectralWavefrontPt::recreateSwapChain()
     cleanupSwapChain();
     createSwapChain();
     createImageViews();
+    createSyncObjects();
 }
 
 void SpectralWavefrontPt::cleanup()
@@ -1297,17 +1408,4 @@ VKAPI_ATTR vk::Bool32 VKAPI_CALL SpectralWavefrontPt::debugCallback(
 {
     std::cerr << "Validation: " << pData->pMessage << std::endl;
     return vk::False;
-}
-
-int main()
-{
-    try {
-        SpectralWavefrontPt app;
-        app.run();
-    }
-    catch (const std::exception& e) {
-        std::cerr << e.what() << std::endl;
-        return EXIT_FAILURE;
-    }
-    return EXIT_SUCCESS;
 }

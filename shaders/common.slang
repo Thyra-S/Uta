@@ -1,44 +1,22 @@
 // Common.slang
 module Common;
 
-// Push Constants
-public struct SceneParams
-{
-    public float4x4 invView;
-    public float4x4 invProj;
-    public uint frameCounter;
-    public uint currentBounce;
-    public uint maxBounces;
-    public uint totalPixels;
-    public uint width;
-    public uint height;
-
-    /* ---------- Camera Options ---------- */
-    public float apertureRadius; // 0.0 = sharp pinhole
-    public float focalDistance;  // Distance to in-focus plane
-    public float2 shiftOffset;   // Lens shift in NDC units 
-    public float tiltAngle;      // Tilt angle in radians 
-    public float2 tiltAxis;      // Normalized 2D rotation axis
-};
-
-// Ray State Queue Item
 public struct RayPayload
 {
     public float3 origin;
     public float tMin;
     public float3 direction;
     public float tMax;
-    
+
     public float4 wavelengths;
-    public float4 throughput; // Spectral power distribution (SPD) weight per bin
-    
+    public float4 throughput;
+
     public uint pixelIndex;
     public uint bounceCount;
-    public uint isTerminated; 
+    public uint isTerminated;
     public uint padding;
 };
 
-// Intersection State Queue Item
 public struct HitPayload
 {
     public float3 worldPos;
@@ -46,8 +24,50 @@ public struct HitPayload
     public float3 normal;
     public uint primitiveId;
     public float2 uv;
-    public uint hitStatus; 
+    public uint hitStatus;
     public uint padding;
+};
+
+public struct SceneParams
+{
+    public float4x4 invView;
+    public float4x4 invProj;
+
+    public uint64_t vertexBufferAddress;
+    public uint64_t indexBufferAddress;
+
+    public float2 shiftOffset;
+    public float2 tiltAxis;
+
+    public float tiltAngle;
+    public float focalDistance;
+    public float apertureRadius;
+    public uint width;
+
+    public uint height;
+    public uint frameCounter;
+    public uint currentBounce;
+    public uint maxBounces;
+
+    public uint totalPixels;
+    public uint pad0;
+    public uint pad1;
+    public uint pad2;
+};
+
+public struct GpuMeshDesc
+{
+    public uint64_t positionBufferAddress;
+    public uint64_t attributtesBufferAddress; // Matches C++ header spelling
+    public uint64_t indexBufferAddress;
+    public uint materialId;
+    public uint padding;
+};
+
+public struct VertexAttributes
+{
+    public float3 norm;
+    public float2 uv;
 };
 
 // Convert 1D thread index to 2D pixel coordinate
