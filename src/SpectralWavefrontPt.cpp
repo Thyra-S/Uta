@@ -1,4 +1,5 @@
-#include "SpectralWavefrontPt.h"
+//#include "SpectralWavefrontPt.h"
+#include "ObjectLoading.h"
 
 void SpectralWavefrontPt::run(const std::string& modelPath, const std::string& materialPath)
 {
@@ -384,17 +385,8 @@ void SpectralWavefrontPt::createWavefrontQueues()
 }
 
 /*---------- SCENE, OBJECT, ACCELERATION STRUCTURE CREATION ----------*/
-
-void SpectralWavefrontPt::createScene(const std::string& modelPath, const std::string& materialPath)
+void SpectralWavefrontPt::updateCameraMatrices()
 {
-    meshes.clear();
-    instances.clear();
-
-    camera.position = glm::vec3(0.0f, 2.5f, 5.0f);
-    camera.target = glm::vec3(0.0f, 0.5f, 0.0f);
-    camera.up = glm::vec3(0.0f, 1.0f, 0.0f);
-    camera.fovY = 45.0f;
-
     glm::mat4 view = glm::lookAt(camera.position, camera.target, camera.up);
     glm::mat4 proj = glm::perspective(
         glm::radians(camera.fovY),
@@ -403,83 +395,30 @@ void SpectralWavefrontPt::createScene(const std::string& modelPath, const std::s
         1000.0f
     );
 
-    //proj[1][1] *= -1.0f;
-
     invView = glm::inverse(view);
     invProj = glm::inverse(proj);
+}
 
-    // Mesh 0: Ground Plane (Quad)
-    MeshGeometry floorMesh{
-         .vertices = {
-             { -5.0f, 0.0f, -5.0f },
-             {  5.0f, 0.0f, -5.0f },
-             {  5.0f, 0.0f,  5.0f },
-             { -5.0f, 0.0f,  5.0f }
-         },
-         .attributes = {
-             { {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f} },
-             { {0.0f, 1.0f, 0.0f}, {1.0f, 0.0f} },
-             { {0.0f, 1.0f, 0.0f}, {1.0f, 1.0f} },
-             { {0.0f, 1.0f, 0.0f}, {0.0f, 1.0f} }
-         },
-         .indices = { 0, 1, 2, 2, 3, 0 }
-    };
-    meshes.push_back(std::move(floorMesh));
+void SpectralWavefrontPt::createScene(const std::string& modelPath, const std::string& materialPath)
+{
+    meshes.clear();
+    instances.clear();
 
-    // Mesh 1: Cube / Box
-    MeshGeometry boxMesh{
-        .vertices = {
-            // Front face (Z = 0.5)
-            { -0.5f, -0.5f,  0.5f }, {  0.5f, -0.5f,  0.5f }, {  0.5f,  0.5f,  0.5f }, { -0.5f,  0.5f,  0.5f },
-            // Back face (Z = -0.5)
-            {  0.5f, -0.5f, -0.5f }, { -0.5f, -0.5f, -0.5f }, { -0.5f,  0.5f, -0.5f }, {  0.5f,  0.5f, -0.5f },
-            // Top face (Y = 0.5)
-            { -0.5f,  0.5f,  0.5f }, {  0.5f,  0.5f,  0.5f }, {  0.5f,  0.5f, -0.5f }, { -0.5f,  0.5f, -0.5f },
-            // Bottom face (Y = -0.5)
-            { -0.5f, -0.5f, -0.5f }, {  0.5f, -0.5f, -0.5f }, {  0.5f, -0.5f,  0.5f }, { -0.5f, -0.5f,  0.5f }
-        },
-        .attributes = {
-            // Front face
-            { {0.0f, 0.0f,  1.0f}, {0.0f, 0.0f} }, { {0.0f, 0.0f,  1.0f}, {1.0f, 0.0f} },
-            { {0.0f, 0.0f,  1.0f}, {1.0f, 1.0f} }, { {0.0f, 0.0f,  1.0f}, {0.0f, 1.0f} },
-            // Back face
-            { {0.0f, 0.0f, -1.0f}, {0.0f, 0.0f} }, { {0.0f, 0.0f, -1.0f}, {1.0f, 0.0f} },
-            { {0.0f, 0.0f, -1.0f}, {1.0f, 1.0f} }, { {0.0f, 0.0f, -1.0f}, {0.0f, 1.0f} },
-            // Top face
-            { {0.0f, 1.0f,  0.0f}, {0.0f, 0.0f} }, { {0.0f, 1.0f,  0.0f}, {1.0f, 0.0f} },
-            { {0.0f, 1.0f,  0.0f}, {1.0f, 1.0f} }, { {0.0f, 1.0f,  0.0f}, {0.0f, 1.0f} },
-            // Bottom face
-            { {0.0f, -1.0f, 0.0f}, {0.0f, 0.0f} }, { {0.0f, -1.0f, 0.0f}, {1.0f, 0.0f} },
-            { {0.0f, -1.0f, 0.0f}, {1.0f, 1.0f} }, { {0.0f, -1.0f, 0.0f}, {0.0f, 1.0f} }
-        },
-        .indices = {
-            0,  1,  2,  2,  3,  0, // Front
-            4,  5,  6,  6,  7,  4, // Back
-            8,  9, 10, 10, 11,  8, // Top
-            12, 13, 14, 14, 15, 12 // Bottom
-        }
-    };
-    meshes.push_back(std::move(boxMesh));
+    // 1. Establish fallback camera in case USD file contains no UsdGeomCamera
+    camera.position = glm::vec3(0.0f, 2.0f, 8.0f);
+    camera.target = glm::vec3(0.0f, 2.0f, 0.0f);
+    camera.up = glm::vec3(0.0f, 1.0f, 0.0f);
+    camera.fovY = 45.0f;
 
-    // Instance 0: Floor
-    instances.push_back(
-        {
-        .meshIndex = 0,
-        .transform = glm::mat4(1.0f),
-        .customInstanceId = 0,
-        .materialId = 0
-        }
-    );
+    // 2. Load USD meshes, instances, and camera
+    loadUsdScene(modelPath, meshes, instances, camera);
 
-    // Instance 1: Box shifted in space
-    instances.push_back(
-        {
-        .meshIndex = 1,
-        .transform = glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, 1.0f, 0.0f)),
-        .customInstanceId = 1,
-        .materialId = 1
-        }
-    );
+    // 3. Load MaterialX if provided
+    if (!materialPath.empty()) {
+        WavefrontData::GpuOpenPbrMaterial material = loadOpenPbrFromMtlx(materialPath);
+    }
+
+    updateCameraMatrices();
 }
 
 void SpectralWavefrontPt::createAccelerationStructures()

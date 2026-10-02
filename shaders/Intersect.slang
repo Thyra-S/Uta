@@ -53,7 +53,7 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
         hit.primitiveId           = query.CommittedPrimitiveIndex();
         hit.uv                    = query.CommittedTriangleBarycentrics(); // float2 (u, v)
         hit.worldPos              = ray.origin + ray.direction * query.CommittedRayT();
-        hit.normal                = float3(0.0, 0.0, 0.0); // Resolved in Shade.slang
+        //hit.normal                = float3(0.0, 0.0, 0.0); // Resolved in Shade.slang
     }
 
     g_HitQueue[rayIndex] = hit;

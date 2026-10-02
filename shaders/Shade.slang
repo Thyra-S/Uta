@@ -24,9 +24,7 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
 
     uint2 pixelCoord = uint2(ray.pixelIndex % params.width, ray.pixelIndex / params.width);
 
-    // ==========================================
-    // CASE A: RAY MISSED (Black)
-    // ==========================================
+    /* ---- RAY MISS ---- */
     if (hit.hitStatus == 0)
     {
         g_AccumulationImage[pixelCoord] = float4(0.0, 0.0, 0.0, 1.0);
@@ -35,44 +33,53 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
         return;
     }
 
-    // ==========================================
-    // CASE B: RAY HIT GEOMETRY (Normal / Solid Color)
-    // ==========================================
+    /* ---- RAY HIT ---- */
+    // Evaluate BRSDF and generate new ray direction
 
     // Option 1: Interpolate and visualize smooth surface normal
     GpuMeshDesc* meshDescs = (GpuMeshDesc*)params.vertexBufferAddress;
     GpuMeshDesc mesh = meshDescs[hit.instanceCustomIndex];
 
-    uint3* indices = (uint3*)mesh.indexBufferAddress;
-    uint3 tri = indices[hit.primitiveId];
+    uint *indices = (uint *)mesh.indexBufferAddress;
+    uint3 tri = uint3
+    (
+    indices[hit.primitiveId * 3 + 0],
+    indices[hit.primitiveId * 3 + 1],
+    indices[hit.primitiveId * 3 + 2]
+    );
 
     VertexAttributes* attrs = (VertexAttributes*)mesh.attributtesBufferAddress;
     VertexAttributes a0 = attrs[tri.x];
     VertexAttributes a1 = attrs[tri.y];
     VertexAttributes a2 = attrs[tri.z];
 
-    // Barycentric interpolation: u = hit.uv.x, v = hit.uv.y
-    float b0 = 1.0 - hit.uv.x - hit.uv.y;
-    float b1 = hit.uv.x;
-    float b2 = hit.uv.y;
+    hit.normal = normalize(a0.norm * (1.0f - hit.uv.x - hit.uv.y) + a1.norm * hit.uv.x + a2.norm * hit.uv.y);
+   
+    uint seed = rayIndex + (params.frameCounter * params.totalPixels + params.currentBounce * params.totalPixels);
 
-    float3 normal = normalize(b0 * a0.norm + b1 * a1.norm + b2 * a2.norm);
+    float pdf;
+    float3 localDir = sampleCosineHemisphere(randomFloat2(seed), pdf);
+    float3 nextDir = normalize(toWorld(localDir, hit.normal));
 
-    // Map normal [-1, 1] -> [0, 1] RGB
-    float3 displayColor = normal * 0.5 + 0.5;
+    // Spawn next bounce ray
+    ray.origin = hit.worldPos + hit.normal * 0.001f; // offset to avoid self-intersection
+    ray.direction = nextDir;
+    ray.bounceCount += 1;
+    
+    // Spectral throughput:
+    // For ideal Lambertian diffuse, (BRDF * cosTheta) / pdf cancels out to albedo.
+    // If your surface albedo is 1.0 across all wavelengths:
+    // ray.throughput remains unchanged.
+    float3 rgbAlbedo, coeffs;
+    rgbAlbedo = g_AlbedoTexture.Sample(uv);
+    coeffs = Sample3DLUT();
 
-    float3 newSampleRadiance = displayColor;
+    spectralAlbedo.x = rgbToSpectrum(rgbAlbedo, ray.wavelengths.x);
+    spectralAlbedo.y = rgbToSpectrum(rgbAlbedo, ray.wavelengths.y);
+    spectralAlbedo.z = rgbToSpectrum(rgbAlbedo, ray.wavelengths.z);
+    spectralAlbedo.w = rgbToSpectrum(rgbAlbedo, ray.wavelengths.w);
 
-    // Accumulate raw sum of radiance
-    if (params.frameCounter == 0)
-    {
-        g_AccumulationImage[pixelCoord] = float4(newSampleRadiance, 1.0);
-    }
-    else
-    {
-        g_AccumulationImage[pixelCoord] += float4(newSampleRadiance, 0.0);
-    }
+    ray.throughput *= albedo;
 
-    ray.isTerminated = 1;
     g_RayQueue[rayIndex] = ray;
 }

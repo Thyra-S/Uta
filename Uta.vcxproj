@@ -19,6 +19,7 @@
     </ProjectConfiguration>
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="header\ObjectLoading.h" />
     <ClInclude Include="header\SpectralWavefrontPt.h" />
   </ItemGroup>
   <ItemGroup>

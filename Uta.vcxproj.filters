@@ -18,6 +18,9 @@
     <ClInclude Include="header\SpectralWavefrontPt.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="header\ObjectLoading.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="src\SpectralWavefrontPt.cpp">

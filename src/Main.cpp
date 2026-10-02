@@ -2,8 +2,8 @@
 
 int main(int argc, char* argv[])
 {
-    std::string modelPath = (argc > 1) ? argv[1] : "models/scene.usd";
-    std::string materialPath = (argc > 2) ? argv[2] : "materials/shader.mtlx";
+    std::string modelPath = (argc > 1) ? argv[1] : "models/utah_teapot.usda";
+    std::string materialPath = (argc > 2) ? argv[2] : "";
     try {
         SpectralWavefrontPt app;
         app.run(modelPath, materialPath);
