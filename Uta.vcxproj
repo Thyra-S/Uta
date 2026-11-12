@@ -24,6 +24,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="src\Main.cpp" />
+    <ClCompile Include="src\miniz.c" />
     <ClCompile Include="src\ObjectLoading.cpp" />
     <ClCompile Include="src\SpectralWavefrontPt.cpp" />
   </ItemGroup>
