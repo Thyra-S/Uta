@@ -30,6 +30,9 @@
   </ItemGroup>
   <ItemGroup>
     <None Include=".gitignore" />
+    <None Include="materials\ceramic.mtlx" />
+    <None Include="materials\gold.mtlx" />
+    <None Include="materials\matte_floor.mtlx" />
     <None Include="shaders\Intersect.slang" />
     <None Include="shaders\OpenPBRMat.slang" />
     <None Include="shaders\RayGen.slang" />

@@ -106,6 +106,12 @@ namespace WavefrontData
         uint32_t padding;
     };
 
+    struct GpuTexture {
+        vk::raii::Image image = nullptr;
+        vk::raii::DeviceMemory memory = nullptr;
+        vk::raii::ImageView view = nullptr;
+    };
+
     struct alignas(16) GpuOpenPbrMaterial
     {
         /* ------------------BASE LOBE------------------ */
@@ -273,6 +279,9 @@ private:
     vk::raii::DeviceMemory             materialMemory = nullptr;
     uint64_t                           materialBufferAddress = 0;
 
+    std::vector<WavefrontData::GpuTexture> sceneTextures;
+    vk::raii::Sampler linearSampler = nullptr;
+
     vk::raii::AccelerationStructureKHR  tlas = nullptr;
     vk::raii::Buffer                   tlasBuffer = nullptr;
     vk::raii::DeviceMemory             tlasMemory = nullptr;
@@ -375,6 +384,7 @@ private:
         uint32_t primitiveCount
     );
     void createMeshDescriptorBuffer();
+    void createSceneTextures(const std::vector<struct CpuTextureData>& cpuTextures);
 
     /*---------- RUNTIME ----------*/
     void createCommandPool();

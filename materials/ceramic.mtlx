@@ -1,0 +1,19 @@
+<?xml version="1.0"?>
+<materialx version="1.38">
+  <open_pbr_surface name="Ceramic_Porcelain" type="surfaceshader">
+    <input name="base_weight" type="float" value="0.85" />
+    <input name="base_color" type="color3" value="0.8808, 0.8808, 0.8808" />
+    <input name="base_roughness" type="float" value="0.25" />
+    <input name="base_metalness" type="float" value="0.0" />
+    <input name="specular_weight" type="float" value="1.0" />
+    <input name="specular_color" type="color3" value="1.0, 1.0, 1.0" />
+    <input name="specular_roughness" type="float" value="0.08" />
+    <input name="specular_ior" type="float" value="1.50" />
+    <input name="coat_weight" type="float" value="1.0" />
+    <input name="coat_roughness" type="float" value="0.02" />
+    <input name="coat_ior" type="float" value="1.60" />
+  </open_pbr_surface>
+  <surfacematerial name="Ceramic_Material" type="material">
+    <input name="surfaceshader" type="surfaceshader" nodename="Ceramic_Porcelain" />
+  </surfacematerial>
+</materialx>

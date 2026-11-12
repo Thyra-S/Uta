@@ -8,6 +8,7 @@ ConstantBuffer<SceneParams> params;
 [[vk::binding(1, 0)]] RWTexture2D<float4>            g_AccumulationImage;
 [[vk::binding(2, 0)]] RWStructuredBuffer<RayPayload> g_RayQueue;
 [[vk::binding(3, 0)]] RWStructuredBuffer<HitPayload> g_HitQueue;
+[[vk::binding(5, 0)]] Sampler2D g_Textures[];
 
 // Decorrelated PCG hash state initializer per pixel, sample, and bounce
 uint initRng(uint pixelIndex, uint frameCounter, uint bounce)
@@ -120,11 +121,42 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
     GpuMeshDesc        mesh = meshDescs[hit.instanceCustomIndex];
     GpuOpenPbrMaterial mat  = materials[mesh.materialId];
 
-    float3 V      = -ray.direction;
-    float3 normal = (dot(hit.normal, V) < 0.0f) ? -hit.normal : hit.normal;
+    float3 V = -ray.direction;
+    // Face-forwarded geometric normal (used for ray origin offset to prevent self-intersection)
+    float3 geoNormal = (dot(hit.normal, V) < 0.0f) ? -hit.normal : hit.normal;
+    float3 normal = geoNormal;
 
-    float4 baseReflectance = evaluateSpectrum4(mat.baseColorCoeffs, ray.wavelengths);
-    float4 specReflectance = evaluateSpectrum4(mat.specularColorCoeffs, ray.wavelengths);
+    // Tangent-space normal map override
+    if (mat.normalTexId != 0xFFFFFFFFu)
+    {
+        float3 nTex = g_Textures[NonUniformResourceIndex(mat.normalTexId)].SampleLevel(hit.uv, 0.0f).xyz;
+        float3 localN = normalize(nTex * 2.0f - 1.0f);
+        normal = normalize(toWorld(localN, geoNormal));
+
+        // Clamp shading normal if normal map tilts it behind the view vector V
+        if (dot(normal, V) < 1e-4f)
+        {
+            normal = geoNormal;
+        }
+    }
+
+    float3 baseRgb = mat.baseColorCoeffs.rgb;
+    if (mat.baseColorTexId != 0xFFFFFFFFu)
+    {
+        baseRgb *= g_Textures[NonUniformResourceIndex(mat.baseColorTexId)].SampleLevel(hit.uv, 0.0f).rgb;
+    }
+    float4 baseReflectance = rgbToSpectrum4(baseRgb, ray.wavelengths);
+    float4 specReflectance = rgbToSpectrum4(mat.specularColorCoeffs.rgb, ray.wavelengths);
+
+    // Specular & Coat Roughness texture overrides
+    if (mat.specularRoughnessTexId != 0xFFFFFFFFu)
+    {
+        mat.specularRoughness = g_Textures[NonUniformResourceIndex(mat.specularRoughnessTexId)].SampleLevel(hit.uv, 0.0f).r;
+    }
+    if (mat.coatRoughnessTexId != 0xFFFFFFFFu)
+    {
+        mat.coatRoughness = g_Textures[NonUniformResourceIndex(mat.coatRoughnessTexId)].SampleLevel(hit.uv, 0.0f).r;
+    }
 
     // 3. Emission Lobe
     if (mat.emissionAndLuminance.w > 0.0f && any(mat.emissionAndLuminance.xyz > 0.0f))
@@ -266,10 +298,10 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
     }
 
     // 7. Next Bounce State Advancement
-    ray.origin      = hit.worldPos + normal * 1e-3f; // Offset along normal prevents self-intersection
-    ray.direction   = nextDir;
-    ray.tMin        = 1e-3f;
-    ray.tMax        = 10000.0f;
+    ray.origin = hit.worldPos + geoNormal * 1e-3f; // Offset along true geometric normal
+    ray.direction = nextDir;
+    ray.tMin = 1e-3f;
+    ray.tMax = 10000.0f;
     ray.bounceCount += 1;
 
     if (ray.bounceCount >= params.maxBounces)

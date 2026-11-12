@@ -214,6 +214,8 @@ void SpectralWavefrontPt::createLogicalDevice()
         {.shaderDrawParameters = true},
         {
             .descriptorIndexing = true,
+            .shaderSampledImageArrayNonUniformIndexing = true,
+            .runtimeDescriptorArray = true,
             .scalarBlockLayout = true,
             .bufferDeviceAddress = true // Crucial for Ray Tracing BVH and fast pointer math
         },
@@ -460,6 +462,157 @@ void SpectralWavefrontPt::createMaterialBuffer()
     materialBufferAddress = device.getBufferAddress({ .buffer = *materialBuffer });
 }
 
+void SpectralWavefrontPt::createSceneTextures(const std::vector<CpuTextureData>& cpuTextures)
+{
+    sceneTextures.clear();
+
+    // 1. Create linear repeat sampler for texture lookups
+    vk::SamplerCreateInfo samplerInfo{
+        .magFilter = vk::Filter::eLinear,
+        .minFilter = vk::Filter::eLinear,
+        .mipmapMode = vk::SamplerMipmapMode::eLinear,
+        .addressModeU = vk::SamplerAddressMode::eRepeat,
+        .addressModeV = vk::SamplerAddressMode::eRepeat,
+        .addressModeW = vk::SamplerAddressMode::eRepeat,
+        .mipLodBias = 0.0f,
+        .anisotropyEnable = vk::False,
+        .maxAnisotropy = 1.0f,
+        .compareEnable = vk::False,
+        .minLod = 0.0f,
+        .maxLod = 0.0f,
+        .borderColor = vk::BorderColor::eIntOpaqueBlack,
+        .unnormalizedCoordinates = vk::False
+    };
+    linearSampler = vk::raii::Sampler(device, samplerInfo);
+
+    // Ensure at least 1 fallback texture exists so Descriptor Set Binding 5 is never empty
+    std::vector<CpuTextureData> fallbackList;
+    const auto& texturesToUpload = cpuTextures.empty() ? [&]() -> const std::vector<CpuTextureData>&{
+        fallbackList.push_back(CpuTextureData{
+            .filepath = "fallback_white",
+            .width = 1,
+            .height = 1,
+            .isSrgb = false,
+            .pixels = { 255, 255, 255, 255 }
+            });
+        return fallbackList;
+        }() : cpuTextures;
+
+    sceneTextures.reserve(texturesToUpload.size());
+
+    for (const auto& cpuTex : texturesToUpload)
+    {
+        vk::Format texFormat = cpuTex.isSrgb ? vk::Format::eR8G8B8A8Srgb : vk::Format::eR8G8B8A8Unorm;
+        vk::DeviceSize imageSize = static_cast<vk::DeviceSize>(cpuTex.width) * cpuTex.height * 4;
+
+        // Staging buffer
+        vk::BufferCreateInfo stagingInfo{
+            .size = imageSize,
+            .usage = vk::BufferUsageFlagBits::eTransferSrc,
+            .sharingMode = vk::SharingMode::eExclusive
+        };
+        vk::raii::Buffer tempStagingBuf(device, stagingInfo);
+        auto stagingReq = tempStagingBuf.getMemoryRequirements();
+
+        vk::MemoryAllocateInfo stagingAlloc{
+            .allocationSize = stagingReq.size,
+            .memoryTypeIndex = findMemoryType(
+                stagingReq.memoryTypeBits,
+                vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent)
+        };
+        vk::raii::DeviceMemory tempStagingMem(device, stagingAlloc);
+        tempStagingBuf.bindMemory(*tempStagingMem, 0);
+
+        void* mapped = tempStagingMem.mapMemory(0, imageSize);
+        memcpy(mapped, cpuTex.pixels.data(), static_cast<size_t>(imageSize));
+        tempStagingMem.unmapMemory();
+
+        // Device-local Image
+        WavefrontData::GpuTexture gpuTex{};
+        vk::ImageCreateInfo imageInfo{
+            .imageType = vk::ImageType::e2D,
+            .format = texFormat,
+            .extent = { cpuTex.width, cpuTex.height, 1 },
+            .mipLevels = 1,
+            .arrayLayers = 1,
+            .samples = vk::SampleCountFlagBits::e1,
+            .tiling = vk::ImageTiling::eOptimal,
+            .usage = vk::ImageUsageFlagBits::eTransferDst | vk::ImageUsageFlagBits::eSampled,
+            .sharingMode = vk::SharingMode::eExclusive
+        };
+        gpuTex.image = vk::raii::Image(device, imageInfo);
+        auto imgReq = gpuTex.image.getMemoryRequirements();
+
+        vk::MemoryAllocateInfo imgAlloc{
+            .allocationSize = imgReq.size,
+            .memoryTypeIndex = findMemoryType(imgReq.memoryTypeBits, vk::MemoryPropertyFlagBits::eDeviceLocal)
+        };
+        gpuTex.memory = vk::raii::DeviceMemory(device, imgAlloc);
+        gpuTex.image.bindMemory(*gpuTex.memory, 0);
+
+        // Transition Undefined -> TransferDst, Copy, Transition TransferDst -> ShaderReadOnlyOptimal
+        vk::CommandBufferAllocateInfo cmdAlloc{
+            .commandPool = *commandPool,
+            .level = vk::CommandBufferLevel::ePrimary,
+            .commandBufferCount = 1
+        };
+        vk::raii::CommandBuffers cmds(device, cmdAlloc);
+        auto& cmd = cmds[0];
+        cmd.begin({ .flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit });
+
+        vk::ImageSubresourceRange subRange{ vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1 };
+
+        vk::ImageMemoryBarrier2 toDst{
+            .srcStageMask = vk::PipelineStageFlagBits2::eNone,
+            .srcAccessMask = vk::AccessFlagBits2::eNone,
+            .dstStageMask = vk::PipelineStageFlagBits2::eTransfer,
+            .dstAccessMask = vk::AccessFlagBits2::eTransferWrite,
+            .oldLayout = vk::ImageLayout::eUndefined,
+            .newLayout = vk::ImageLayout::eTransferDstOptimal,
+            .image = *gpuTex.image,
+            .subresourceRange = subRange
+        };
+        cmd.pipelineBarrier2(vk::DependencyInfo{ .imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &toDst });
+
+        vk::BufferImageCopy copyRegion{
+            .bufferOffset = 0,
+            .bufferRowLength = 0,
+            .bufferImageHeight = 0,
+            .imageSubresource = { vk::ImageAspectFlagBits::eColor, 0, 0, 1 },
+            .imageOffset = { 0, 0, 0 },
+            .imageExtent = { cpuTex.width, cpuTex.height, 1 }
+        };
+        cmd.copyBufferToImage(*tempStagingBuf, *gpuTex.image, vk::ImageLayout::eTransferDstOptimal, { copyRegion });
+
+        vk::ImageMemoryBarrier2 toShaderRead{
+            .srcStageMask = vk::PipelineStageFlagBits2::eTransfer,
+            .srcAccessMask = vk::AccessFlagBits2::eTransferWrite,
+            .dstStageMask = vk::PipelineStageFlagBits2::eComputeShader,
+            .dstAccessMask = vk::AccessFlagBits2::eShaderSampledRead,
+            .oldLayout = vk::ImageLayout::eTransferDstOptimal,
+            .newLayout = vk::ImageLayout::eShaderReadOnlyOptimal,
+            .image = *gpuTex.image,
+            .subresourceRange = subRange
+        };
+        cmd.pipelineBarrier2(vk::DependencyInfo{ .imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &toShaderRead });
+
+        cmd.end();
+        vk::SubmitInfo submitInfo{ .commandBufferCount = 1, .pCommandBuffers = &*cmd };
+        computeAndGraphicsQueue.submit(submitInfo, nullptr);
+        computeAndGraphicsQueue.waitIdle();
+
+        vk::ImageViewCreateInfo viewInfo{
+            .image = *gpuTex.image,
+            .viewType = vk::ImageViewType::e2D,
+            .format = texFormat,
+            .subresourceRange = subRange
+        };
+        gpuTex.view = vk::raii::ImageView(device, viewInfo);
+
+        sceneTextures.push_back(std::move(gpuTex));
+    }
+}
+
 void SpectralWavefrontPt::createDeviceLocalBuffer(
     const void* srcData,
     vk::DeviceSize size,
@@ -551,52 +704,24 @@ void SpectralWavefrontPt::createScene(const std::string& modelPath, const std::s
     camera.up = glm::vec3(0.0f, 1.0f, 0.0f);
     camera.fovY = 45.0f;
 
-    // --- MATERIAL 0: Ceramic / Porcelain (Teapot) ---
-    WavefrontData::GpuOpenPbrMaterial ceramicMat{
-        .baseColorCoeffs = glm::vec4(0.0f, 0.0f, 1.2f, 0.85f),
-        .baseWeight = 0.85f,
-        .baseRoughness = 0.25f,
-        .baseMetalness = 0.0f,
-        .specularWeight = 1.0f,
-        .specularRoughness = 0.08f,
-        .specularIor = 1.50f,
-        .coatWeight = 1.0f,
-        .coatRoughness = 0.02f,
-        .coatIor = 1.60f
-    };
-    materials.push_back(ceramicMat); // Index 0
+    std::vector<CpuTextureData> cpuTextures;
+    std::unordered_map<std::string, uint32_t> textureCache;
 
-    // --- MATERIAL 1: Neutral Matte Floor (Ground Plane) ---
-    WavefrontData::GpuOpenPbrMaterial floorMat{
-        .baseColorCoeffs = glm::vec4(0.0f, 0.0f, 0.0f, 0.25f),
-        .baseWeight = 1.0f,
-        .baseRoughness = 0.60f,
-        .baseMetalness = 0.0f,
-        .specularWeight = 0.0f
-    };
-    materials.push_back(floorMat); // Index 1
+    // 1. Load primary material from materialPath (or fallback to materials/ceramic.mtlx) -> Index 0
+    std::string primaryMtlx = (!materialPath.empty() && std::filesystem::exists(materialPath))
+        ? materialPath
+        : "materials/ceramic.mtlx";
+    materials.push_back(loadOpenPbrFromMtlx(primaryMtlx, cpuTextures, textureCache)); // Index 0
 
-    // --- MATERIAL 2: Polished Gold Conductor (Metal) ---
-    WavefrontData::GpuOpenPbrMaterial goldMat{
-    .baseColorCoeffs = glm::vec4(16.0f, 2.0f, -4.3f, 1.0f),
-    .baseWeight = 1.0f,
-    .baseRoughness = 0.12f,
-    .baseMetalness = 1.0f,
-    .specularColorCoeffs = glm::vec4(0.0f, 0.0f, 100.0f, 1.0f),.specularWeight = 1.0f,
-    .specularRoughness = 0.12f,
-    .specularIor = 1.50f
-    };
-    materials.push_back(goldMat); // Index 2
+    // 2. Load scene materials from .mtlx files -> Index 1 & Index 2
+    materials.push_back(loadOpenPbrFromMtlx("materials/matte_floor.mtlx", cpuTextures, textureCache)); // Index 1
+    materials.push_back(loadOpenPbrFromMtlx("materials/gold.mtlx", cpuTextures, textureCache));        // Index 2
 
-    // 1. Single call to load primary model geometry (Teapot)
-    loadUsdScene(modelPath, meshes, instances, camera);
+    // 3. Load USD scene geometry, camera, and any USD-authored materials/textures
+    //    (Meshes without a USD material binding default to materialId = 0, i.e., primaryMtlx)
+    loadUsdScene(modelPath, meshes, instances, materials, cpuTextures, camera);
 
-    for (size_t i = 0; i < instances.size(); i++)
-    {
-        instances[i].materialId = 0; // Material 2: gold
-    }
-
-    // 2. Base Ground Quad Geometry (Shared Mesh & BLAS)
+    // 4. Base Ground Quad Geometry (Shared Mesh & BLAS)
     MeshGeometry groundMesh{};
     float planeSize = 100.0f;
     float groundY = 0.0f;
@@ -615,27 +740,28 @@ void SpectralWavefrontPt::createScene(const std::string& modelPath, const std::s
     uint32_t groundMeshIndex = static_cast<uint32_t>(meshes.size());
     meshes.push_back(std::move(groundMesh));
 
-    // Instance A: Standard Base Ground Plane (Material 1: Matte Floor)
-    SceneInstance matteGroundInstance{
+    // Instance A: Standard Base Ground Plane (Material 1: matte_floor.mtlx)
+    instances.push_back(SceneInstance{
         .meshIndex = groundMeshIndex,
         .transform = glm::mat4(1.0f),
         .customInstanceId = static_cast<uint32_t>(instances.size()),
         .materialId = 1
-    };
-    instances.push_back(matteGroundInstance);
+        });
 
-    // Instance B: Separate Transformed Plane (Material 2: Gold Metal)
+    // Instance B: Separate Transformed Plane (Material 2: gold.mtlx)
     glm::mat4 goldTransform = glm::translate(glm::mat4(1.0f), glm::vec3(6.0f, 0.05f, -6.0f)) *
         glm::rotate(glm::mat4(1.0f), glm::radians(45.0f), glm::vec3(1.0f, 0.0f, 0.0f)) *
         glm::scale(glm::mat4(1.0f), glm::vec3(0.05f, 0.05f, 0.05f));
 
-    SceneInstance goldGroundInstance{
+    instances.push_back(SceneInstance{
         .meshIndex = groundMeshIndex,
         .transform = goldTransform,
         .customInstanceId = static_cast<uint32_t>(instances.size()),
         .materialId = 2
-    };
-    instances.push_back(goldGroundInstance);
+        });
+
+    // 5. Upload all discovered textures to GPU
+    createSceneTextures(cpuTextures);
 
     updateCameraMatrices();
 }
@@ -949,7 +1075,8 @@ void SpectralWavefrontPt::createDescriptorSetLayout()
     // Binding 2: Ray Queue (SSBO)
     // Binding 3: Hit Queue (SSBO)
     // Binding 4: Resolved SDR Image (RW Storage Image)
-    std::array<vk::DescriptorSetLayoutBinding, 5> bindings{ {
+	// Binding 5: Scene Textures (Sampled Image Array) - optional, may be empty if no textures are used
+    std::array<vk::DescriptorSetLayoutBinding, 6> bindings{ {
         {
             .binding = 0,\
             .descriptorType = vk::DescriptorType::eAccelerationStructureKHR,
@@ -978,6 +1105,12 @@ void SpectralWavefrontPt::createDescriptorSetLayout()
             .binding = 4,
             .descriptorType = vk::DescriptorType::eStorageImage,
             .descriptorCount = 1,
+            .stageFlags = vk::ShaderStageFlagBits::eCompute
+        },
+        {
+            .binding = 5,
+            .descriptorType = vk::DescriptorType::eCombinedImageSampler,
+            .descriptorCount = static_cast<uint32_t>(sceneTextures.size()),
             .stageFlags = vk::ShaderStageFlagBits::eCompute
         }
     } };
@@ -1008,11 +1141,13 @@ void SpectralWavefrontPt::createDescriptorSetLayout()
 
 void SpectralWavefrontPt::createDescriptorPoolAndSets()
 {
-    std::array<vk::DescriptorPoolSize, 3> poolSizes
+    uint32_t texCount = static_cast<uint32_t>(sceneTextures.size());
+    std::array<vk::DescriptorPoolSize, 4> poolSizes
     { {
         { vk::DescriptorType::eAccelerationStructureKHR, 1 },
         { vk::DescriptorType::eStorageImage, 2 },
-        { vk::DescriptorType::eStorageBuffer, 2 }
+        { vk::DescriptorType::eStorageBuffer, 2 },
+        { vk::DescriptorType::eCombinedImageSampler, texCount }
     } };
 
     vk::DescriptorPoolCreateInfo poolInfo
@@ -1063,7 +1198,17 @@ void SpectralWavefrontPt::createDescriptorPoolAndSets()
         .range = VK_WHOLE_SIZE
     };
 
-    std::array<vk::WriteDescriptorSet, 5> descriptorWrites
+    std::vector<vk::DescriptorImageInfo> texImageInfos;
+    texImageInfos.reserve(sceneTextures.size());
+    for (const auto& tex : sceneTextures) {
+        texImageInfos.push_back(vk::DescriptorImageInfo{
+            .sampler = *linearSampler,
+            .imageView = *tex.view,
+            .imageLayout = vk::ImageLayout::eShaderReadOnlyOptimal
+            });
+    }
+
+    std::array<vk::WriteDescriptorSet, 6> descriptorWrites
     { {
         {
             .pNext = &asInfo,
@@ -1100,6 +1245,14 @@ void SpectralWavefrontPt::createDescriptorPoolAndSets()
             .descriptorCount = 1,
             .descriptorType = vk::DescriptorType::eStorageImage,
             .pImageInfo = &resolvedImageInfo
+        },
+        {
+            .dstSet = *descriptorSets[0],
+            .dstBinding = 5,
+            .dstArrayElement = 0,
+            .descriptorCount = static_cast<uint32_t>(texImageInfos.size()),
+            .descriptorType = vk::DescriptorType::eCombinedImageSampler,
+            .pImageInfo = texImageInfos.data()
         }
     } };
 

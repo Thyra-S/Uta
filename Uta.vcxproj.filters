@@ -49,5 +49,8 @@
     <None Include="shaders\Shade.slang" />
     <None Include="shaders\Tonemap.slang" />
     <None Include="shaders\OpenPBRMat.slang" />
+    <None Include="materials\ceramic.mtlx" />
+    <None Include="materials\matte_floor.mtlx" />
+    <None Include="materials\gold.mtlx" />
   </ItemGroup>
 </Project>

@@ -1,0 +1,16 @@
+<?xml version="1.0"?>
+<materialx version="1.38">
+  <open_pbr_surface name="Polished_Gold" type="surfaceshader">
+    <input name="base_weight" type="float" value="1.0" />
+    <input name="base_color" type="color3" value="1.000, 0.766, 0.336"/>
+    <input name="base_roughness" type="float" value="0.12" />
+    <input name="base_metalness" type="float" value="1.0" />
+    <input name="specular_weight" type="float" value="1.0" />
+    <input name="specular_color" type="color3" value="1.0, 1.0, 1.0" />
+    <input name="specular_roughness" type="float" value="0.12" />
+    <input name="specular_ior" type="float" value="1.50" />
+  </open_pbr_surface>
+  <surfacematerial name="Gold_Material" type="material">
+    <input name="surfaceshader" type="surfaceshader" nodename="Polished_Gold" />
+  </surfacematerial>
+</materialx>
