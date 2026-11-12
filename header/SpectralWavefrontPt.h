@@ -14,6 +14,8 @@
 #include <memory>
 #include <stdexcept>
 #include <vector>
+#include <chrono>
+
 #define GLM_FORCE_DEPTH_ZERO_TO_ONE
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
@@ -31,8 +33,9 @@ import vulkan_hpp;
 #define GLFW_EXPOSE_NATIVE_WIN32
 #include <GLFW/glfw3native.h>
 
-constexpr int MAX_FRAMES_IN_FLIGHT = 2;
+constexpr int MAX_FRAMES_IN_FLIGHT = 1;
 constexpr uint32_t SPECTRAL_BINS = 4; // 4-channel Hero Wavelength Sampling
+constexpr uint32_t SAMPLES_PER_FRAME = 16; // Or 64 if well under the ~2s OS TDR limit
 
 // GPU-aligned data layouts for Wavefront Queues
 namespace WavefrontData
@@ -74,7 +77,7 @@ namespace WavefrontData
         glm::mat4 invProj;
 
         uint64_t  vertexBufferAddress;
-        uint64_t  indexBufferAddress;
+        uint64_t  materialBufferAddress;
 
         glm::vec2 shiftOffset{ 0.0f, 0.0f };
         glm::vec2 tiltAxis{ 0.0f, 1.0f };
@@ -243,6 +246,19 @@ private:
     vk::Extent2D                     swapChainExtent;
     std::vector<vk::raii::ImageView> swapChainImageViews;
 
+    /*---------- BENCHMARK & OUTPUT SETTINGS ----------*/
+    uint32_t targetSamples = 1024; // Automatically save when reached
+    bool autoExportDone = false;
+    std::chrono::high_resolution_clock::time_point renderStartTime;
+
+    // Buffer to download resolved HDR image pixels to CPU
+    vk::raii::Buffer       stagingBuffer = nullptr;
+    vk::raii::DeviceMemory stagingBufferMemory = nullptr;
+
+    void saveScreenshotAndLog(const std::string& prefix);
+    void createStagingBuffer();
+    static void keyCallback(GLFWwindow* window, int key, int scancode, int action, int mods);
+
     /*---------- SCENE GEOMETRY & ACCELERATION STRUCTURES ----------*/
     // Bottom Level (Meshes/Instances) and Top Level (Scene/Instances)
     Camera                              camera;
@@ -251,6 +267,12 @@ private:
 
     std::vector<MeshGeometry>           meshes;
     std::vector<SceneInstance>          instances;
+    std::vector<WavefrontData::GpuOpenPbrMaterial> materials;
+
+    vk::raii::Buffer                   materialBuffer = nullptr;
+    vk::raii::DeviceMemory             materialMemory = nullptr;
+    uint64_t                           materialBufferAddress = 0;
+
     vk::raii::AccelerationStructureKHR  tlas = nullptr;
     vk::raii::Buffer                   tlasBuffer = nullptr;
     vk::raii::DeviceMemory             tlasMemory = nullptr;
@@ -340,6 +362,8 @@ private:
     /*---------- SCENE, OBJECT, ACCELERATION STRUCTURE CREATION ----------*/
     void updateCameraMatrices();
     void createScene(const std::string& modelPath, const std::string& materialPath);
+    void createDeviceLocalBuffer(const void* srcData,vk::DeviceSize size, vk::BufferUsageFlags usage, vk::raii::Buffer& dstBuffer, vk::raii::DeviceMemory& dstMemory);
+	void createMaterialBuffer();
     void createAccelerationStructures();
     void buildBLAS(MeshGeometry& mesh);
     void buildTLAS();

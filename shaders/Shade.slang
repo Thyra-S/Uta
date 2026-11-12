@@ -1,85 +1,281 @@
+// Shade.slang
 import Common;
 
 [[vk::push_constant]]
 ConstantBuffer<SceneParams> params;
 
-// Set 0 Bindings
+// Descriptor Set 0 Bindings
 [[vk::binding(1, 0)]] RWTexture2D<float4>            g_AccumulationImage;
 [[vk::binding(2, 0)]] RWStructuredBuffer<RayPayload> g_RayQueue;
 [[vk::binding(3, 0)]] RWStructuredBuffer<HitPayload> g_HitQueue;
 
+// Decorrelated PCG hash state initializer per pixel, sample, and bounce
+uint initRng(uint pixelIndex, uint frameCounter, uint bounce)
+{
+    uint state = pixelIndex + (frameCounter * 719393u) + (bounce * 17971u);
+    return pcg_hash(state);
+}
+
+// Physically-based daylight sky dome for miss rays
+float3 getEnvironmentRadiance(float3 dir)
+{
+    float t = clamp(dir.y, 0.0f, 1.0f);
+
+    float3 zenith  = float3(0.65f);
+    float3 horizon = float3(0.85f);
+    float3 ground  = float3(0.22f);
+
+    float3 sky = (dir.y >= 0.0f)
+        ? lerp(horizon, zenith, sqrt(t))
+        : lerp(horizon, ground, clamp(-dir.y * 4.0f, 0.0f, 1.0f));
+
+    float3 sunDir = normalize(float3(0.5f, 0.8f, 0.3f));
+    if (dot(dir, sunDir) > 0.92f)
+    {
+        sky += float3(3.0f);
+    }
+    return sky;
+}
+
+// Samples an isotropic GGX microfacet half-vector and evaluates the Smith G2 BRDF weight:
+// weight = (G * VdotH) / (NdotV * NdotH). Returns false if the reflected ray falls below the surface.
+bool sampleGGXMicrofacet(
+    float2     u,
+    float      alpha,
+    float3     V,
+    float3     normal,
+    float      cosThetaV,
+    out float3 nextDir,
+    out float  VdotH,
+    out float  weight)
+{
+    float a2 = alpha * alpha;
+    float phi = 2.0f * 3.1415926535f * u.x;
+    float cosThetaH = sqrt((1.0f - u.y) / max(1e-7f, 1.0f + (a2 - 1.0f) * u.y));
+    float sinThetaH = sqrt(max(0.0f, 1.0f - cosThetaH * cosThetaH));
+
+    float3 H_local = float3(sinThetaH * cos(phi), sinThetaH * sin(phi), cosThetaH);
+    float3 H = normalize(toWorld(H_local, normal));
+    nextDir = reflect(-V, H);
+
+    float NdotL = dot(normal, nextDir);
+    if (NdotL <= 0.0f)
+    {
+        VdotH  = 0.0f;
+        weight = 0.0f;
+        return false;
+    }
+
+    VdotH = max(1e-4f, dot(V, H));
+    float NdotV = max(1e-4f, cosThetaV);
+    float NdotH = max(1e-4f, cosThetaH);
+
+    float G1_V = (2.0f * NdotV) / (NdotV + sqrt(a2 + (1.0f - a2) * NdotV * NdotV));
+    float G1_L = (2.0f * NdotL) / (NdotL + sqrt(a2 + (1.0f - a2) * NdotL * NdotL));
+
+    weight = (G1_V * G1_L * VdotH) / (NdotV * NdotH);
+    return true;
+}
+
+void terminateRay(uint rayIndex, inout RayPayload ray)
+{
+    ray.isTerminated = 1;
+    g_RayQueue[rayIndex] = ray;
+}
+
 [shader("compute")]
-[numthreads(64, 1, 1)]
+[numthreads(8, 8, 1)]
 void main(uint3 dispatchThreadID : SV_DispatchThreadID)
 {
-    uint rayIndex = dispatchThreadID.x;
-    if (rayIndex >= params.totalPixels)
+    uint2 pixelCoord = dispatchThreadID.xy;
+    if (pixelCoord.x >= params.width || pixelCoord.y >= params.height)
         return;
 
-    RayPayload ray = g_RayQueue[rayIndex];
-    HitPayload hit = g_HitQueue[rayIndex];
+    uint rayIndex = pixelCoord.y * params.width + pixelCoord.x;
 
+    RayPayload ray = g_RayQueue[rayIndex];
     if (ray.isTerminated != 0)
         return;
 
-    uint2 pixelCoord = uint2(ray.pixelIndex % params.width, ray.pixelIndex / params.width);
+    HitPayload hit        = g_HitQueue[rayIndex];
+    uint       seed       = initRng(rayIndex, params.frameCounter, params.currentBounce);
 
-    /* ---- RAY MISS ---- */
+    // 1. Ray Miss (Environment Sky)
     if (hit.hitStatus == 0)
     {
-        g_AccumulationImage[pixelCoord] = float4(0.0, 0.0, 0.0, 1.0);
-        ray.isTerminated = 1;
-        g_RayQueue[rayIndex] = ray;
+        float3 skyRgb       = getEnvironmentRadiance(ray.direction);
+        float4 skySpectrum  = rgbToSpectrum4(skyRgb, ray.wavelengths);
+        float4 missRadiance = ray.throughput * skySpectrum;
+        float3 missRgb      = spectral4ToLinearRgb(missRadiance, ray.wavelengths);
+
+        g_AccumulationImage[pixelCoord] += float4(missRgb, 0.0f);
+        terminateRay(rayIndex, ray);
         return;
     }
 
-    /* ---- RAY HIT ---- */
-    // Evaluate BRSDF and generate new ray direction
+    // 2. Geometry & Material Resolution
+    GpuMeshDesc*        meshDescs = (GpuMeshDesc*)params.vertexBufferAddress;
+    GpuOpenPbrMaterial* materials = (GpuOpenPbrMaterial*)params.materialBufferAddress;
 
-    // Option 1: Interpolate and visualize smooth surface normal
-    GpuMeshDesc* meshDescs = (GpuMeshDesc*)params.vertexBufferAddress;
-    GpuMeshDesc mesh = meshDescs[hit.instanceCustomIndex];
+    GpuMeshDesc        mesh = meshDescs[hit.instanceCustomIndex];
+    GpuOpenPbrMaterial mat  = materials[mesh.materialId];
 
-    uint *indices = (uint *)mesh.indexBufferAddress;
-    uint3 tri = uint3
-    (
-    indices[hit.primitiveId * 3 + 0],
-    indices[hit.primitiveId * 3 + 1],
-    indices[hit.primitiveId * 3 + 2]
-    );
+    float3 V      = -ray.direction;
+    float3 normal = (dot(hit.normal, V) < 0.0f) ? -hit.normal : hit.normal;
 
-    VertexAttributes* attrs = (VertexAttributes*)mesh.attributtesBufferAddress;
-    VertexAttributes a0 = attrs[tri.x];
-    VertexAttributes a1 = attrs[tri.y];
-    VertexAttributes a2 = attrs[tri.z];
+    float4 baseReflectance = evaluateSpectrum4(mat.baseColorCoeffs, ray.wavelengths);
+    float4 specReflectance = evaluateSpectrum4(mat.specularColorCoeffs, ray.wavelengths);
 
-    hit.normal = normalize(a0.norm * (1.0f - hit.uv.x - hit.uv.y) + a1.norm * hit.uv.x + a2.norm * hit.uv.y);
-   
-    uint seed = rayIndex + (params.frameCounter * params.totalPixels + params.currentBounce * params.totalPixels);
+    // 3. Emission Lobe
+    if (mat.emissionAndLuminance.w > 0.0f && any(mat.emissionAndLuminance.xyz > 0.0f))
+    {
+        float4 emissionSpectrum = rgbToSpectrum4(mat.emissionAndLuminance.xyz, ray.wavelengths) * mat.emissionAndLuminance.w;
+        float4 emittedRadiance  = ray.throughput * emissionSpectrum;
+        float3 emittedRgb       = spectral4ToLinearRgb(emittedRadiance, ray.wavelengths);
 
-    float pdf;
-    float3 localDir = sampleCosineHemisphere(randomFloat2(seed), pdf);
-    float3 nextDir = normalize(toWorld(localDir, hit.normal));
+        g_AccumulationImage[pixelCoord] += float4(emittedRgb, 0.0f);
 
-    // Spawn next bounce ray
-    ray.origin = hit.worldPos + hit.normal * 0.001f; // offset to avoid self-intersection
-    ray.direction = nextDir;
+        // Terminate pure non-scattering emissive surfaces
+        if (mat.baseWeight <= 1e-4f && mat.specularWeight <= 1e-4f)
+        {
+            terminateRay(rayIndex, ray);
+            return;
+        }
+    }
+
+    // 4. OpenPBR Multi-Lobe Energy Partitioning
+    float cosThetaV = clamp(dot(normal, V), 0.0f, 1.0f);
+
+    float4 F_dielectric      = evalFresnelDielectric(cosThetaV, max(1.001f, mat.specularIor), float4(1.0f));
+    float4 F_spec_dielectric = F_dielectric * mat.specularWeight;
+    float4 F0_metal          = baseReflectance * specReflectance;
+    float  schlickFactor     = pow(max(0.0f, 1.0f - cosThetaV), 5.0f);
+    float4 F_metal           = F0_metal + (float4(1.0f) - F0_metal) * schlickFactor;
+    float4 F                 = lerp(F_spec_dielectric, F_metal, mat.baseMetalness);
+
+    float4 F_coat = float4(0.0f);
+    float  pCoat  = 0.0f;
+    if (mat.coatWeight > 0.0f)
+    {
+        F_coat = evalFresnelDielectric(cosThetaV, max(1.001f, mat.coatIor), float4(1.0f)) * mat.coatWeight;
+        pCoat  = clamp(0.25f * dot(F_coat, float4(1.0f)), 0.0f, 1.0f);
+    }
+    float4 coatTransmission = max(float4(0.0f), float4(1.0f) - F_coat);
+
+    float specEnergy = clamp(0.25f * dot(F, float4(1.0f)), 0.0f, 1.0f);
+    float diffEnergy = mat.baseWeight * (1.0f - mat.baseMetalness)
+                     * clamp(1.0f - 0.25f * dot(F_spec_dielectric, float4(1.0f)), 0.0f, 1.0f);
+    float baseTotalEnergy = specEnergy + diffEnergy;
+
+    if (pCoat < 1e-5f && baseTotalEnergy < 1e-5f)
+    {
+        terminateRay(rayIndex, ray);
+        return;
+    }
+
+    // 5. Lobe Importance Sampling
+    float3 nextDir;
+    float4 throughputUpdate;
+    float  xi = randomFloat(seed);
+
+    if (xi < pCoat)
+    {
+        // 5a. Clearcoat Lobe (Specular Reflection)
+        float coatRoughness = clamp(mat.coatRoughness, 0.001f, 1.0f);
+        float alpha         = coatRoughness * coatRoughness;
+
+        if (alpha < 0.002f)
+        {
+            nextDir          = reflect(-V, normal);
+            throughputUpdate = F_coat / max(1e-4f, pCoat);
+        }
+        else
+        {
+            float VdotH, weight;
+            if (!sampleGGXMicrofacet(randomFloat2(seed), alpha, V, normal, cosThetaV, nextDir, VdotH, weight))
+            {
+                terminateRay(rayIndex, ray);
+                return;
+            }
+
+            float4 F_coat_H  = evalFresnelDielectric(VdotH, max(1.001f, mat.coatIor), float4(1.0f)) * mat.coatWeight;
+            throughputUpdate = (F_coat_H * weight) / max(1e-4f, pCoat);
+        }
+    }
+    else
+    {
+        float xiBase     = (xi - pCoat) / max(1e-4f, 1.0f - pCoat);
+        float pSpec      = (mat.baseMetalness >= 0.99f)
+                         ? 1.0f
+                         : ((specEnergy <= 1e-5f) ? 0.0f : clamp(specEnergy / baseTotalEnergy, 0.05f, 0.95f));
+        float pDiff      = 1.0f - pSpec;
+        float invBasePdf = 1.0f / max(1e-4f, 1.0f - pCoat);
+
+        if (xiBase < pSpec)
+        {
+            // 5b. Base Specular Lobe (GGX / Mirror)
+            float roughness = clamp(mat.specularRoughness, 0.001f, 1.0f);
+            float alpha     = roughness * roughness;
+
+            if (alpha < 0.002f)
+            {
+                nextDir          = reflect(-V, normal);
+                throughputUpdate = (F / pSpec) * coatTransmission * invBasePdf;
+            }
+            else
+            {
+                float VdotH, weight;
+                if (!sampleGGXMicrofacet(randomFloat2(seed), alpha, V, normal, cosThetaV, nextDir, VdotH, weight))
+                {
+                    terminateRay(rayIndex, ray);
+                    return;
+                }
+
+                float4 F_dielectric_H = evalFresnelDielectric(VdotH, max(1.001f, mat.specularIor), float4(1.0f));
+                float  schlick_H      = pow(max(0.0f, 1.0f - VdotH), 5.0f);
+                float4 F_metal_H      = F0_metal + (float4(1.0f) - F0_metal) * schlick_H;
+                float4 F_H            = lerp(F_dielectric_H * mat.specularWeight, F_metal_H, mat.baseMetalness);
+
+                throughputUpdate = (F_H * weight / pSpec) * coatTransmission * invBasePdf;
+            }
+        }
+        else
+        {
+            // 5c. Base Diffuse Lobe (Lambertian)
+            nextDir = sampleCosineHemisphere(randomFloat2(seed), normal);
+
+            float4 diffuseReflectance = baseReflectance * mat.baseWeight * (1.0f - mat.baseMetalness)
+                                      * max(float4(0.0f), float4(1.0f) - F_spec_dielectric);
+            throughputUpdate = (diffuseReflectance / pDiff) * coatTransmission * invBasePdf;
+        }
+    }
+
+    ray.throughput *= throughputUpdate;
+
+    // 6. Russian Roulette Termination
+    if (params.currentBounce >= 3)
+    {
+        float maxThroughput = max(ray.throughput.x, max(ray.throughput.y, max(ray.throughput.z, ray.throughput.w)));
+        float q = clamp(maxThroughput, 0.05f, 0.95f);
+        if (randomFloat(seed) > q)
+        {
+            terminateRay(rayIndex, ray);
+            return;
+        }
+        ray.throughput /= q;
+    }
+
+    // 7. Next Bounce State Advancement
+    ray.origin      = hit.worldPos + normal * 1e-3f; // Offset along normal prevents self-intersection
+    ray.direction   = nextDir;
+    ray.tMin        = 1e-3f;
+    ray.tMax        = 10000.0f;
     ray.bounceCount += 1;
-    
-    // Spectral throughput:
-    // For ideal Lambertian diffuse, (BRDF * cosTheta) / pdf cancels out to albedo.
-    // If your surface albedo is 1.0 across all wavelengths:
-    // ray.throughput remains unchanged.
-    float3 rgbAlbedo, coeffs;
-    rgbAlbedo = g_AlbedoTexture.Sample(uv);
-    coeffs = Sample3DLUT();
 
-    spectralAlbedo.x = rgbToSpectrum(rgbAlbedo, ray.wavelengths.x);
-    spectralAlbedo.y = rgbToSpectrum(rgbAlbedo, ray.wavelengths.y);
-    spectralAlbedo.z = rgbToSpectrum(rgbAlbedo, ray.wavelengths.z);
-    spectralAlbedo.w = rgbToSpectrum(rgbAlbedo, ray.wavelengths.w);
-
-    ray.throughput *= albedo;
+    if (ray.bounceCount >= params.maxBounces)
+    {
+        ray.isTerminated = 1;
+    }
 
     g_RayQueue[rayIndex] = ray;
 }

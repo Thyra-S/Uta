@@ -1,5 +1,43 @@
 //#include "SpectralWavefrontPt.h"
 #include "ObjectLoading.h"
+#define TINYEXR_USE_MINIZ 1
+#define TINYEXR_USE_STB_ZLIB 0
+#define TINYEXR_IMPLEMENTATION
+#include <tinyexr.h>
+#include <ctime>
+#include <filesystem>
+#include <iomanip>
+#include <sstream>
+
+static vk::SurfaceFormatKHR chooseSwapSurfaceFormat(const std::vector<vk::SurfaceFormatKHR>& availableFormats)
+{
+    // 1. First priority: scRGB FP16 (True HDR)
+    for (const auto& format : availableFormats)
+    {
+        if (format.format == vk::Format::eR16G16B16A16Sfloat &&
+            format.colorSpace == vk::ColorSpaceKHR::eExtendedSrgbLinearEXT)
+        {
+            return format;
+        }
+    }
+
+    // 2. Second priority: Standard SDR fallback
+    for (const auto& format : availableFormats)
+    {
+        if (format.format == vk::Format::eB8G8R8A8Unorm &&
+            format.colorSpace == vk::ColorSpaceKHR::eSrgbNonlinear)
+        {
+            return format;
+        }
+        if (format.format == vk::Format::eR8G8B8A8Unorm &&
+            format.colorSpace == vk::ColorSpaceKHR::eSrgbNonlinear)
+        {
+            return format;
+        }
+    }
+
+    return availableFormats[0];
+}
 
 void SpectralWavefrontPt::run(const std::string& modelPath, const std::string& materialPath)
 {
@@ -14,7 +52,11 @@ void SpectralWavefrontPt::initWindow()
     glfwInit();
     glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
     glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
-    window = glfwCreateWindow(WIDTH, HEIGHT, "Vulkan Spectral Wavefront Path Tracer (vk_ray_query)", nullptr, nullptr);
+    glfwWindowHint(GLFW_RED_BITS, 16);
+    glfwWindowHint(GLFW_GREEN_BITS, 16);
+    glfwWindowHint(GLFW_BLUE_BITS, 16);
+    glfwWindowHint(GLFW_ALPHA_BITS, 16);
+    window = glfwCreateWindow(WIDTH, HEIGHT, "Uta Path Tracer", nullptr, nullptr);
 }
 
 void SpectralWavefrontPt::initVulkan(const std::string& modelPath, const std::string& materialPath)
@@ -31,8 +73,10 @@ void SpectralWavefrontPt::initVulkan(const std::string& modelPath, const std::st
     // Wavefront Data Infrastructure
     createAccumulationImage();
     createResolvedImage();
+    createStagingBuffer();
     createWavefrontQueues();
     createScene(modelPath, materialPath);
+    createMaterialBuffer();
     createAccelerationStructures();
     createMeshDescriptorBuffer();
 
@@ -80,6 +124,7 @@ std::vector<const char*> SpectralWavefrontPt::getRequiredInstanceExtensions()
     uint32_t glfwExtensionCount = 0;
     auto glfwExtensions = glfwGetRequiredInstanceExtensions(&glfwExtensionCount);
     std::vector<const char*> extensions(glfwExtensions, glfwExtensions + glfwExtensionCount);
+    extensions.push_back(VK_EXT_SWAPCHAIN_COLOR_SPACE_EXTENSION_NAME);
     if (enableValidationLayers) {
         extensions.push_back(vk::EXTDebugUtilsExtensionName);
     }
@@ -286,13 +331,12 @@ void SpectralWavefrontPt::createAccumulationImage()
     computeAndGraphicsQueue.submit(submitInfo, nullptr);
     computeAndGraphicsQueue.waitIdle();
 }
-
 void SpectralWavefrontPt::createResolvedImage()
 {
     vk::ImageCreateInfo imageInfo
     {
         .imageType = vk::ImageType::e2D,
-        .format = vk::Format::eR8G8B8A8Unorm,
+        .format = vk::Format::eR16G16B16A16Sfloat,
         .extent = { WIDTH, HEIGHT, 1 },
         .mipLevels = 1,
         .arrayLayers = 1,
@@ -317,7 +361,7 @@ void SpectralWavefrontPt::createResolvedImage()
     {
         .image = *resolvedImage,
         .viewType = vk::ImageViewType::e2D,
-        .format = vk::Format::eR8G8B8A8Unorm,
+        .format = vk::Format::eR16G16B16A16Sfloat,
         .subresourceRange = { vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1 }
     };
     resolvedImageView = vk::raii::ImageView(device, viewInfo);
@@ -399,24 +443,199 @@ void SpectralWavefrontPt::updateCameraMatrices()
     invProj = glm::inverse(proj);
 }
 
+void SpectralWavefrontPt::createMaterialBuffer()
+{
+    if (materials.empty()) {
+        materials.push_back(WavefrontData::GpuOpenPbrMaterial{});
+    }
+
+    const vk::DeviceSize bufferSize = materials.size() * sizeof(WavefrontData::GpuOpenPbrMaterial);
+    createDeviceLocalBuffer(
+        materials.data(),
+        bufferSize,
+        vk::BufferUsageFlagBits::eStorageBuffer,
+        materialBuffer,
+        materialMemory);
+
+    materialBufferAddress = device.getBufferAddress({ .buffer = *materialBuffer });
+}
+
+void SpectralWavefrontPt::createDeviceLocalBuffer(
+    const void* srcData,
+    vk::DeviceSize size,
+    vk::BufferUsageFlags usage,
+    vk::raii::Buffer& dstBuffer,
+    vk::raii::DeviceMemory& dstMemory)
+{
+    // 1. Create temporary CPU-visible staging buffer
+    vk::BufferCreateInfo stagingInfo{
+        .size = size,
+        .usage = vk::BufferUsageFlagBits::eTransferSrc,
+        .sharingMode = vk::SharingMode::eExclusive
+    };
+    vk::raii::Buffer tempStagingBuffer(device, stagingInfo);
+    auto stagingMemReq = tempStagingBuffer.getMemoryRequirements();
+
+    vk::MemoryAllocateInfo stagingAllocInfo{
+        .allocationSize = stagingMemReq.size,
+        .memoryTypeIndex = findMemoryType(
+            stagingMemReq.memoryTypeBits,
+            vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent)
+    };
+    vk::raii::DeviceMemory tempStagingMemory(device, stagingAllocInfo);
+    tempStagingBuffer.bindMemory(*tempStagingMemory, 0);
+
+    void* mapped = tempStagingMemory.mapMemory(0, size);
+    memcpy(mapped, srcData, size);
+    tempStagingMemory.unmapMemory();
+
+    // 2. Create permanent VRAM (eDeviceLocal) buffer with Device Address support
+    vk::BufferCreateInfo dstInfo{
+        .size = size,
+        .usage = usage | vk::BufferUsageFlagBits::eTransferDst | vk::BufferUsageFlagBits::eShaderDeviceAddress,
+        .sharingMode = vk::SharingMode::eExclusive
+    };
+    dstBuffer = vk::raii::Buffer(device, dstInfo);
+    auto dstMemReq = dstBuffer.getMemoryRequirements();
+
+    vk::MemoryAllocateFlagsInfo flagsInfo{ .flags = vk::MemoryAllocateFlagBits::eDeviceAddress };
+    vk::MemoryAllocateInfo dstAllocInfo{
+        .pNext = &flagsInfo,
+        .allocationSize = dstMemReq.size,
+        .memoryTypeIndex = findMemoryType(
+            dstMemReq.memoryTypeBits,
+            vk::MemoryPropertyFlagBits::eDeviceLocal)
+    };
+    dstMemory = vk::raii::DeviceMemory(device, dstAllocInfo);
+    dstBuffer.bindMemory(*dstMemory, 0);
+
+    // 3. Copy staging -> VRAM via one-time command buffer
+    vk::CommandBufferAllocateInfo cmdAllocInfo{
+        .commandPool = *commandPool,
+        .level = vk::CommandBufferLevel::ePrimary,
+        .commandBufferCount = 1
+    };
+    vk::raii::CommandBuffers cmds(device, cmdAllocInfo);
+    auto& cmd = cmds[0];
+
+    cmd.begin({ .flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit });
+
+    vk::BufferCopy copyRegion{ .srcOffset = 0, .dstOffset = 0, .size = size };
+    cmd.copyBuffer(*tempStagingBuffer, *dstBuffer, { copyRegion });
+
+    // Memory barrier ensuring transfer finishes before AS build or Compute Shader reads
+    vk::MemoryBarrier2 barrier{
+        .srcStageMask = vk::PipelineStageFlagBits2::eTransfer,
+        .srcAccessMask = vk::AccessFlagBits2::eTransferWrite,
+        .dstStageMask = vk::PipelineStageFlagBits2::eAccelerationStructureBuildKHR | vk::PipelineStageFlagBits2::eComputeShader,
+        .dstAccessMask = vk::AccessFlagBits2::eAccelerationStructureReadKHR | vk::AccessFlagBits2::eShaderRead
+    };
+    cmd.pipelineBarrier2(vk::DependencyInfo{ .memoryBarrierCount = 1, .pMemoryBarriers = &barrier });
+
+    cmd.end();
+
+    vk::SubmitInfo submitInfo{ .commandBufferCount = 1, .pCommandBuffers = &*cmd };
+    computeAndGraphicsQueue.submit(submitInfo, nullptr);
+    computeAndGraphicsQueue.waitIdle();
+    // tempStagingBuffer & tempStagingMemory automatically clean up on scope exit
+}
+
 void SpectralWavefrontPt::createScene(const std::string& modelPath, const std::string& materialPath)
 {
     meshes.clear();
     instances.clear();
+    materials.clear();
 
-    // 1. Establish fallback camera in case USD file contains no UsdGeomCamera
     camera.position = glm::vec3(0.0f, 2.0f, 8.0f);
     camera.target = glm::vec3(0.0f, 2.0f, 0.0f);
     camera.up = glm::vec3(0.0f, 1.0f, 0.0f);
     camera.fovY = 45.0f;
 
-    // 2. Load USD meshes, instances, and camera
+    // --- MATERIAL 0: Ceramic / Porcelain (Teapot) ---
+    WavefrontData::GpuOpenPbrMaterial ceramicMat{
+        .baseColorCoeffs = glm::vec4(0.0f, 0.0f, 1.2f, 0.85f),
+        .baseWeight = 0.85f,
+        .baseRoughness = 0.25f,
+        .baseMetalness = 0.0f,
+        .specularWeight = 1.0f,
+        .specularRoughness = 0.08f,
+        .specularIor = 1.50f,
+        .coatWeight = 1.0f,
+        .coatRoughness = 0.02f,
+        .coatIor = 1.60f
+    };
+    materials.push_back(ceramicMat); // Index 0
+
+    // --- MATERIAL 1: Neutral Matte Floor (Ground Plane) ---
+    WavefrontData::GpuOpenPbrMaterial floorMat{
+        .baseColorCoeffs = glm::vec4(0.0f, 0.0f, 0.0f, 0.25f),
+        .baseWeight = 1.0f,
+        .baseRoughness = 0.60f,
+        .baseMetalness = 0.0f,
+        .specularWeight = 0.0f
+    };
+    materials.push_back(floorMat); // Index 1
+
+    // --- MATERIAL 2: Polished Gold Conductor (Metal) ---
+    WavefrontData::GpuOpenPbrMaterial goldMat{
+    .baseColorCoeffs = glm::vec4(16.0f, 2.0f, -4.3f, 1.0f),
+    .baseWeight = 1.0f,
+    .baseRoughness = 0.12f,
+    .baseMetalness = 1.0f,
+    .specularColorCoeffs = glm::vec4(0.0f, 0.0f, 100.0f, 1.0f),.specularWeight = 1.0f,
+    .specularRoughness = 0.12f,
+    .specularIor = 1.50f
+    };
+    materials.push_back(goldMat); // Index 2
+
+    // 1. Single call to load primary model geometry (Teapot)
     loadUsdScene(modelPath, meshes, instances, camera);
 
-    // 3. Load MaterialX if provided
-    if (!materialPath.empty()) {
-        WavefrontData::GpuOpenPbrMaterial material = loadOpenPbrFromMtlx(materialPath);
+    for (size_t i = 0; i < instances.size(); i++)
+    {
+        instances[i].materialId = 0; // Material 2: gold
     }
+
+    // 2. Base Ground Quad Geometry (Shared Mesh & BLAS)
+    MeshGeometry groundMesh{};
+    float planeSize = 100.0f;
+    float groundY = 0.0f;
+
+    groundMesh.vertices = {
+        glm::vec3(-planeSize, groundY, -planeSize),
+        glm::vec3(planeSize, groundY, -planeSize),
+        glm::vec3(planeSize, groundY,  planeSize),
+        glm::vec3(-planeSize, groundY,  planeSize)
+    };
+
+    VertexAttributes normAttr{ .norm = glm::vec3(0.0f, 1.0f, 0.0f), .uv = glm::vec2(0.0f) };
+    groundMesh.attributes = { normAttr, normAttr, normAttr, normAttr };
+    groundMesh.indices = { 0, 2, 1, 0, 3, 2 };
+
+    uint32_t groundMeshIndex = static_cast<uint32_t>(meshes.size());
+    meshes.push_back(std::move(groundMesh));
+
+    // Instance A: Standard Base Ground Plane (Material 1: Matte Floor)
+    SceneInstance matteGroundInstance{
+        .meshIndex = groundMeshIndex,
+        .transform = glm::mat4(1.0f),
+        .customInstanceId = static_cast<uint32_t>(instances.size()),
+        .materialId = 1
+    };
+    instances.push_back(matteGroundInstance);
+
+    // Instance B: Separate Transformed Plane (Material 2: Gold Metal)
+    glm::mat4 goldTransform = glm::translate(glm::mat4(1.0f), glm::vec3(6.0f, 0.05f, -6.0f)) *
+        glm::rotate(glm::mat4(1.0f), glm::radians(45.0f), glm::vec3(1.0f, 0.0f, 0.0f)) *
+        glm::scale(glm::mat4(1.0f), glm::vec3(0.05f, 0.05f, 0.05f));
+
+    SceneInstance goldGroundInstance{
+        .meshIndex = groundMeshIndex,
+        .transform = goldTransform,
+        .customInstanceId = static_cast<uint32_t>(instances.size()),
+        .materialId = 2
+    };
+    instances.push_back(goldGroundInstance);
 
     updateCameraMatrices();
 }
@@ -434,51 +653,30 @@ void SpectralWavefrontPt::createAccelerationStructures()
 
 void SpectralWavefrontPt::buildBLAS(MeshGeometry& mesh)
 {
-    auto createBufferWithAddress = [&](vk::DeviceSize size, vk::BufferUsageFlags usage,
-        vk::raii::Buffer& buffer, vk::raii::DeviceMemory& memory)
-        {
-            vk::BufferCreateInfo info{
-                .size = size,
-                .usage = usage | vk::BufferUsageFlagBits::eShaderDeviceAddress,
-                .sharingMode = vk::SharingMode::eExclusive
-            };
-            buffer = vk::raii::Buffer(device, info);
-            auto memReq = buffer.getMemoryRequirements();
-
-            vk::MemoryAllocateFlagsInfo flagsInfo{ .flags = vk::MemoryAllocateFlagBits::eDeviceAddress };
-            vk::MemoryAllocateInfo allocInfo{
-                .pNext = &flagsInfo,
-                .allocationSize = memReq.size,
-                .memoryTypeIndex = findMemoryType(memReq.memoryTypeBits,
-                                                  vk::MemoryPropertyFlagBits::eHostVisible |
-                                                  vk::MemoryPropertyFlagBits::eHostCoherent)
-            };
-            memory = vk::raii::DeviceMemory(device, allocInfo);
-            buffer.bindMemory(*memory, 0);
-        };
-
-    const vk::BufferUsageFlags geomUsage = vk::BufferUsageFlagBits::eAccelerationStructureBuildInputReadOnlyKHR |
+    const vk::BufferUsageFlags geomUsage =
+        vk::BufferUsageFlagBits::eAccelerationStructureBuildInputReadOnlyKHR |
         vk::BufferUsageFlagBits::eStorageBuffer;
 
-    const vk::DeviceSize vSize = mesh.vertices.size() * sizeof(glm::vec3);
-    const vk::DeviceSize aSize = mesh.attributes.size() * sizeof(VertexAttributes);
-    const vk::DeviceSize iSize = mesh.indices.size() * sizeof(uint32_t);
+    createDeviceLocalBuffer(
+        mesh.vertices.data(),
+        mesh.vertices.size() * sizeof(glm::vec3),
+        geomUsage,
+        mesh.vertexBuffer,
+        mesh.vertexBufferMemory);
 
-    createBufferWithAddress(vSize, geomUsage, mesh.vertexBuffer, mesh.vertexBufferMemory);
-    createBufferWithAddress(aSize, vk::BufferUsageFlagBits::eStorageBuffer, mesh.attributeBuffer, mesh.attributeBufferMemory);
-    createBufferWithAddress(iSize, geomUsage, mesh.indexBuffer, mesh.indexBufferMemory);
+    createDeviceLocalBuffer(
+        mesh.attributes.data(),
+        mesh.attributes.size() * sizeof(VertexAttributes),
+        vk::BufferUsageFlagBits::eStorageBuffer,
+        mesh.attributeBuffer,
+        mesh.attributeBufferMemory);
 
-    void* vData = mesh.vertexBufferMemory.mapMemory(0, vSize);
-    memcpy(vData, mesh.vertices.data(), vSize);
-    mesh.vertexBufferMemory.unmapMemory();
-
-    void* aData = mesh.attributeBufferMemory.mapMemory(0, aSize);
-    memcpy(aData, mesh.attributes.data(), aSize);
-    mesh.attributeBufferMemory.unmapMemory();
-
-    void* iData = mesh.indexBufferMemory.mapMemory(0, iSize);
-    memcpy(iData, mesh.indices.data(), iSize);
-    mesh.indexBufferMemory.unmapMemory();
+    createDeviceLocalBuffer(
+        mesh.indices.data(),
+        mesh.indices.size() * sizeof(uint32_t),
+        geomUsage,
+        mesh.indexBuffer,
+        mesh.indexBufferMemory);
 
     vk::DeviceAddress vertexAddress = device.getBufferAddress({ .buffer = *mesh.vertexBuffer });
     vk::DeviceAddress indexAddress = device.getBufferAddress({ .buffer = *mesh.indexBuffer });
@@ -487,7 +685,7 @@ void SpectralWavefrontPt::buildBLAS(MeshGeometry& mesh)
         .vertexFormat = vk::Format::eR32G32B32Sfloat,
         .vertexData = {.deviceAddress = vertexAddress },
         .vertexStride = sizeof(glm::vec3),
-        .maxVertex = static_cast<uint32_t>(mesh.vertices.size()),
+        .maxVertex = static_cast<uint32_t>(mesh.vertices.size() - 1), // Note: Vulkan spec expects max index (size - 1)
         .indexType = vk::IndexType::eUint32,
         .indexData = {.deviceAddress = indexAddress }
     };
@@ -510,9 +708,23 @@ void SpectralWavefrontPt::buildBLAS(MeshGeometry& mesh)
     auto buildSizes = device.getAccelerationStructureBuildSizesKHR(
         vk::AccelerationStructureBuildTypeKHR::eDevice, buildInfo, { primitiveCount });
 
-    createBufferWithAddress(buildSizes.accelerationStructureSize,
-        vk::BufferUsageFlagBits::eAccelerationStructureStorageKHR,
-        mesh.blasBuffer, mesh.blasMemory);
+    // Allocate BLAS storage buffer in DeviceLocal VRAM!
+    vk::BufferCreateInfo blasBufInfo{
+        .size = buildSizes.accelerationStructureSize,
+        .usage = vk::BufferUsageFlagBits::eAccelerationStructureStorageKHR | vk::BufferUsageFlagBits::eShaderDeviceAddress,
+        .sharingMode = vk::SharingMode::eExclusive
+    };
+    mesh.blasBuffer = vk::raii::Buffer(device, blasBufInfo);
+    auto blasMemReq = mesh.blasBuffer.getMemoryRequirements();
+
+    vk::MemoryAllocateFlagsInfo flagsInfo{ .flags = vk::MemoryAllocateFlagBits::eDeviceAddress };
+    vk::MemoryAllocateInfo blasAllocInfo{
+        .pNext = &flagsInfo,
+        .allocationSize = blasMemReq.size,
+        .memoryTypeIndex = findMemoryType(blasMemReq.memoryTypeBits, vk::MemoryPropertyFlagBits::eDeviceLocal)
+    };
+    mesh.blasMemory = vk::raii::DeviceMemory(device, blasAllocInfo);
+    mesh.blasBuffer.bindMemory(*mesh.blasMemory, 0);
 
     vk::AccelerationStructureCreateInfoKHR createInfo{
         .buffer = *mesh.blasBuffer,
@@ -521,10 +733,8 @@ void SpectralWavefrontPt::buildBLAS(MeshGeometry& mesh)
     };
     mesh.blas = vk::raii::AccelerationStructureKHR(device, createInfo);
 
-    // Build the BLAS on GPU
     buildAccelerationStructureOnGPU(buildInfo, *mesh.blas, buildSizes.buildScratchSize, primitiveCount);
 
-    // Save BLAS 64-bit device address for TLAS instances
     vk::AccelerationStructureDeviceAddressInfoKHR addressInfo{ .accelerationStructure = *mesh.blas };
     mesh.blasAddress = device.getAccelerationStructureAddressKHR(addressInfo);
 }
@@ -705,53 +915,28 @@ void SpectralWavefrontPt::buildAccelerationStructureOnGPU(
 
 void SpectralWavefrontPt::createMeshDescriptorBuffer()
 {
-    // Build host array of descriptors referencing each instance's mesh buffers
     std::vector<WavefrontData::GpuMeshDesc> descriptors;
     descriptors.reserve(instances.size());
 
     for (const auto& inst : instances) {
         const auto& mesh = meshes[inst.meshIndex];
-        descriptors.push_back(WavefrontData::GpuMeshDesc
-            {
+        descriptors.push_back(WavefrontData::GpuMeshDesc{
             .positionBufferAddress = device.getBufferAddress({.buffer = *mesh.vertexBuffer }),
-            .attributtesBufferAddress = device.getBufferAddress({.buffer = *mesh.attributeBuffer}),
+            .attributtesBufferAddress = device.getBufferAddress({.buffer = *mesh.attributeBuffer }),
             .indexBufferAddress = device.getBufferAddress({.buffer = *mesh.indexBuffer }),
             .materialId = inst.materialId,
             .padding = 0
-            }
-        );
+            });
     }
 
     vk::DeviceSize bufferSize = sizeof(WavefrontData::GpuMeshDesc) * descriptors.size();
+    createDeviceLocalBuffer(
+        descriptors.data(),
+        bufferSize,
+        vk::BufferUsageFlagBits::eStorageBuffer,
+        meshDescBuffer,
+        meshDescMemory);
 
-    // Allocate host-visible GPU buffer with device address support
-    vk::BufferCreateInfo bufInfo
-    {
-        .size = bufferSize,
-        .usage = vk::BufferUsageFlagBits::eStorageBuffer | vk::BufferUsageFlagBits::eShaderDeviceAddress,
-        .sharingMode = vk::SharingMode::eExclusive
-    };
-    meshDescBuffer = vk::raii::Buffer(device, bufInfo);
-    auto memReq = meshDescBuffer.getMemoryRequirements();
-
-    vk::MemoryAllocateFlagsInfo flagsInfo{ .flags = vk::MemoryAllocateFlagBits::eDeviceAddress };
-    vk::MemoryAllocateInfo allocInfo
-    {
-        .pNext = &flagsInfo,
-        .allocationSize = memReq.size,
-        .memoryTypeIndex = findMemoryType(memReq.memoryTypeBits,
-                                          vk::MemoryPropertyFlagBits::eHostVisible |
-                                          vk::MemoryPropertyFlagBits::eHostCoherent)
-    };
-    meshDescMemory = vk::raii::DeviceMemory(device, allocInfo);
-    meshDescBuffer.bindMemory(*meshDescMemory, 0);
-
-    // Copy descriptor table to GPU
-    void* data = meshDescMemory.mapMemory(0, bufferSize);
-    memcpy(data, descriptors.data(), bufferSize);
-    meshDescMemory.unmapMemory();
-
-    // Query 64-bit device address to pass in Push Constants
     meshDescAddress = device.getBufferAddress({ .buffer = *meshDescBuffer });
 }
 
@@ -953,11 +1138,14 @@ void SpectralWavefrontPt::recordWavefrontCommands(uint32_t imageIndex)
     auto& cmd = commandBuffers[frameIndex];
     cmd.begin({});
 
+    bool isScRgb = (swapChainSurfaceFormat.format == vk::Format::eR16G16B16A16Sfloat &&
+        swapChainSurfaceFormat.colorSpace == vk::ColorSpaceKHR::eExtendedSrgbLinearEXT);
+
     WavefrontData::SceneParams params{
         .invView = invView,
         .invProj = invProj,
         .vertexBufferAddress = meshDescAddress,
-        .indexBufferAddress = 0,
+        .materialBufferAddress = materialBufferAddress,
         .shiftOffset = glm::vec2(0.0f),
         .tiltAxis = glm::vec2(0.0f, 1.0f),
         .tiltAngle = 0.0f,
@@ -968,91 +1156,109 @@ void SpectralWavefrontPt::recordWavefrontCommands(uint32_t imageIndex)
         .frameCounter = totalSamplesAccumulated,
         .currentBounce = 0,
         .maxBounces = 8,
-        .totalPixels = WIDTH * HEIGHT
+        .totalPixels = WIDTH * HEIGHT,
+		.pad0 = isScRgb ? 1u : 0u,
     };
 
     cmd.bindDescriptorSets(vk::PipelineBindPoint::eCompute, *computePipelineLayout, 0, *descriptorSets[0], nullptr);
 
-    const uint32_t workgroupsX = (WIDTH + 15) / 16;
-    const uint32_t workgroupsY = (HEIGHT + 15) / 16;
+    const uint32_t workgroupsX = (WIDTH + 7) / 8;
+    const uint32_t workgroupsY = (HEIGHT + 7) / 8;
     const uint32_t totalPixels = WIDTH * HEIGHT;
     const uint32_t wavefrontWorkgroups = (totalPixels + 63) / 64;
 
     // --- PHASE 1: RAY GENERATION ---
     // Generates camera rays, samples 4 spectral wavelengths per sample per pixel, populates RayQueue
-    if (*pipelineRayGen) 
+    
+    uint32_t samplesThisFrame = SAMPLES_PER_FRAME;
+    if (!autoExportDone && totalSamplesAccumulated < targetSamples)
     {
-        cmd.bindPipeline(vk::PipelineBindPoint::eCompute, *pipelineRayGen);
-        cmd.pushConstants<WavefrontData::SceneParams>(*computePipelineLayout, vk::ShaderStageFlagBits::eCompute, 0, params);
-        cmd.dispatch(wavefrontWorkgroups, 1, 1);
+        samplesThisFrame = std::min(SAMPLES_PER_FRAME, targetSamples - totalSamplesAccumulated);
     }
 
-    // Barrier: Ensure all rays are written to RayQueue before traversal
-    vk::MemoryBarrier2 rayGenBarrier
+    for (uint32_t s = 0; s < samplesThisFrame; s++)
     {
-        .srcStageMask = vk::PipelineStageFlagBits2::eComputeShader,
-        .srcAccessMask = vk::AccessFlagBits2::eShaderStorageWrite,
-        .dstStageMask = vk::PipelineStageFlagBits2::eComputeShader,
-        .dstAccessMask = vk::AccessFlagBits2::eShaderStorageRead
-    };
-    vk::DependencyInfo depInfo{ .memoryBarrierCount = 1, .pMemoryBarriers = &rayGenBarrier };
-    cmd.pipelineBarrier2(depInfo);
+        params.frameCounter = totalSamplesAccumulated + s;
+        params.currentBounce = 0;
 
-    // --- PHASE 2 & 3: WAVEFRONT BOUNCE LOOP ---
-    for (uint32_t bounce = 0; bounce < params.maxBounces; bounce++)
-    {
-        params.currentBounce = bounce;
-        cmd.pushConstants<WavefrontData::SceneParams>(*computePipelineLayout, vk::ShaderStageFlagBits::eCompute, 0, params);
-
-        // 2a. Intersect: Traces ray queries against TLAS, fills HitQueue
-        if (*pipelineIntersect) 
+        // --- PHASE 1: RAY GENERATION ---
+        if (*pipelineRayGen)
         {
-            cmd.bindPipeline(vk::PipelineBindPoint::eCompute, *pipelineIntersect);
-            cmd.dispatch(wavefrontWorkgroups, 1, 1);
+            cmd.bindPipeline(vk::PipelineBindPoint::eCompute, *pipelineRayGen);
+            cmd.pushConstants<WavefrontData::SceneParams>(*computePipelineLayout, vk::ShaderStageFlagBits::eCompute, 0, params);
+            cmd.dispatch(workgroupsX, workgroupsY, 1);
         }
 
-        // Barrier: Wait for Intersect hits before shading
-        vk::MemoryBarrier2 intersectBarrier
-        {
+        vk::MemoryBarrier2 rayGenBarrier{
             .srcStageMask = vk::PipelineStageFlagBits2::eComputeShader,
             .srcAccessMask = vk::AccessFlagBits2::eShaderStorageWrite,
             .dstStageMask = vk::PipelineStageFlagBits2::eComputeShader,
             .dstAccessMask = vk::AccessFlagBits2::eShaderStorageRead
         };
-        depInfo.pMemoryBarriers = &intersectBarrier;
+        vk::DependencyInfo depInfo{ .memoryBarrierCount = 1, .pMemoryBarriers = &rayGenBarrier };
         cmd.pipelineBarrier2(depInfo);
 
-        // 2b. Spectral Shade: Evaluates BSDF, Hero wavelength sampling, writes radiance to AccumulationImage
-        if (*pipelineShade) 
+        // --- PHASE 2 & 3: WAVEFRONT BOUNCE LOOP ---
+        for (uint32_t bounce = 0; bounce < params.maxBounces; bounce++)
         {
-            cmd.bindPipeline(vk::PipelineBindPoint::eCompute, *pipelineShade);
-            cmd.dispatch(wavefrontWorkgroups, 1, 1);
+            params.currentBounce = bounce;
+            cmd.pushConstants<WavefrontData::SceneParams>(*computePipelineLayout, vk::ShaderStageFlagBits::eCompute, 0, params);
+
+            if (*pipelineIntersect)
+            {
+                cmd.bindPipeline(vk::PipelineBindPoint::eCompute, *pipelineIntersect);
+                cmd.dispatch(workgroupsX, workgroupsY, 1);
+            }
+
+            vk::MemoryBarrier2 intersectBarrier{
+                .srcStageMask = vk::PipelineStageFlagBits2::eComputeShader,
+                .srcAccessMask = vk::AccessFlagBits2::eShaderStorageWrite,
+                .dstStageMask = vk::PipelineStageFlagBits2::eComputeShader,
+                .dstAccessMask = vk::AccessFlagBits2::eShaderStorageRead
+            };
+            depInfo.pMemoryBarriers = &intersectBarrier;
+            cmd.pipelineBarrier2(depInfo);
+
+            if (*pipelineShade)
+            {
+                cmd.bindPipeline(vk::PipelineBindPoint::eCompute, *pipelineShade);
+                cmd.dispatch(workgroupsX, workgroupsY, 1);
+            }
+
+            // Wait for Shade writes to RayQueue AND AccumulationImage before next bounce OR next sample's RayGen
+            vk::MemoryBarrier2 shadeBarrier{
+                .srcStageMask = vk::PipelineStageFlagBits2::eComputeShader,
+                .srcAccessMask = vk::AccessFlagBits2::eShaderStorageWrite,
+                .dstStageMask = vk::PipelineStageFlagBits2::eComputeShader,
+                .dstAccessMask = vk::AccessFlagBits2::eShaderStorageRead | vk::AccessFlagBits2::eShaderStorageWrite
+            };
+            depInfo.pMemoryBarriers = &shadeBarrier;
+            cmd.pipelineBarrier2(depInfo);
         }
-
-        // Barrier: Wait for Shade writes to RayQueue before next bounce traversal
-        vk::MemoryBarrier2 shadeBarrier
-        {
-            .srcStageMask = vk::PipelineStageFlagBits2::eComputeShader,
-            .srcAccessMask = vk::AccessFlagBits2::eShaderStorageWrite,
-            .dstStageMask = vk::PipelineStageFlagBits2::eComputeShader,
-            .dstAccessMask = vk::AccessFlagBits2::eShaderStorageRead
-        };
-        depInfo.pMemoryBarriers = &shadeBarrier;
-        cmd.pipelineBarrier2(depInfo);
     }
 
     // --- PHASE 4: COMPOSITE / TONEMAP & PRESENTATION ---
     // In a production engine, blit or run a final tone-mapping compute pass converting XYZ to sRGB onto swapChainImages[imageIndex]
+    vk::ImageMemoryBarrier2 accumBarrier{
+        .srcStageMask = vk::PipelineStageFlagBits2::eComputeShader,
+        .srcAccessMask = vk::AccessFlagBits2::eShaderStorageWrite,
+        .dstStageMask = vk::PipelineStageFlagBits2::eComputeShader,
+        .dstAccessMask = vk::AccessFlagBits2::eShaderStorageRead,
+        .oldLayout = vk::ImageLayout::eGeneral,
+        .newLayout = vk::ImageLayout::eGeneral,
+        .image = *accumulationImage,
+        .subresourceRange = { vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1 }
+    };
+    cmd.pipelineBarrier2(vk::DependencyInfo{ .imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &accumBarrier });
 
-    
-    // 1. Run Tone Mapping & XYZ->RGB Conversion Pass
-    if (*pipelineTonemap) 
+    if (*pipelineTonemap)
     {
         cmd.bindPipeline(vk::PipelineBindPoint::eCompute, *pipelineTonemap);
         cmd.pushConstants<WavefrontData::SceneParams>(*computePipelineLayout, vk::ShaderStageFlagBits::eCompute, 0, params);
         cmd.dispatch(workgroupsX, workgroupsY, 1);
     }
 
+    // --- PHASE 5: PRESENTATION BLIT (resolvedImage -> swapchain) ---
     vk::ImageMemoryBarrier2 resolvedToSrcBarrier{
         .srcStageMask = vk::PipelineStageFlagBits2::eComputeShader,
         .srcAccessMask = vk::AccessFlagBits2::eShaderStorageWrite,
@@ -1081,7 +1287,6 @@ void SpectralWavefrontPt::recordWavefrontCommands(uint32_t imageIndex)
         .pImageMemoryBarriers = preBlitBarriers.data()
         });
 
-    // 4. Blit from SDR resolvedImage to swapchain image
     vk::ImageBlit blitRegion{
         .srcSubresource = { vk::ImageAspectFlagBits::eColor, 0, 0, 1 },
         .srcOffsets = {{
@@ -1101,9 +1306,7 @@ void SpectralWavefrontPt::recordWavefrontCommands(uint32_t imageIndex)
         { blitRegion }, vk::Filter::eNearest
     );
 
-    // 5. Post-Blit Barriers:
-    //    resolvedImage: eTransferSrcOptimal -> eGeneral (ready for next frame)
-    //    swapChainImages[imageIndex]: eTransferDstOptimal -> ePresentSrcKHR
+    // Restore resolvedImage back to eGeneral (for next frame or screenshot read)
     vk::ImageMemoryBarrier2 restoreResolvedBarrier{
         .srcStageMask = vk::PipelineStageFlagBits2::eTransfer,
         .srcAccessMask = vk::AccessFlagBits2::eTransferRead,
@@ -1140,8 +1343,15 @@ void SpectralWavefrontPt::recordWavefrontCommands(uint32_t imageIndex)
 void SpectralWavefrontPt::createSwapChain()
 {
     auto caps = physicalDevice.getSurfaceCapabilitiesKHR(*surface);
+    auto availableFormats = physicalDevice.getSurfaceFormatsKHR(*surface);
+
+    if (availableFormats.empty()) {
+        throw std::runtime_error("No available surface formats found for swapchain!");
+    }
+
     swapChainExtent = { WIDTH, HEIGHT };
-    swapChainSurfaceFormat = { vk::Format::eB8G8R8A8Srgb, vk::ColorSpaceKHR::eSrgbNonlinear };
+    swapChainSurfaceFormat = chooseSwapSurfaceFormat(availableFormats);
+
 
     vk::SwapchainCreateInfoKHR createInfo
     {
@@ -1155,13 +1365,15 @@ void SpectralWavefrontPt::createSwapChain()
         .imageSharingMode = vk::SharingMode::eExclusive,
         .preTransform = caps.currentTransform,
         .compositeAlpha = vk::CompositeAlphaFlagBitsKHR::eOpaque,
-        .presentMode = vk::PresentModeKHR::eMailbox,
+        .presentMode = vk::PresentModeKHR::eImmediate,
         .clipped = true
     };
 
     swapChain = vk::raii::SwapchainKHR(device, createInfo);
     swapChainImages = swapChain.getImages();
 }
+
+
 
 void SpectralWavefrontPt::createImageViews()
 {
@@ -1206,15 +1418,11 @@ void SpectralWavefrontPt::createSyncObjects()
     renderFinishedSemaphores.clear();
     inFlightFences.clear();
 
-    for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) 
-    {
+    for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
         presentCompleteSemaphores.emplace_back(device, vk::SemaphoreCreateInfo{});
-        renderFinishedSemaphores.emplace_back(device, vk::SemaphoreCreateInfo{});
         inFlightFences.emplace_back(device, vk::FenceCreateInfo{ .flags = vk::FenceCreateFlagBits::eSignaled });
     }
-
-    for (size_t i = 0; i < swapChainImages.size(); i++)
-    {
+    for (size_t i = 0; i < swapChainImages.size(); i++) {
         renderFinishedSemaphores.emplace_back(device, vk::SemaphoreCreateInfo{});
     }
 }
@@ -1253,12 +1461,27 @@ void SpectralWavefrontPt::drawFrame()
     };
 
     result = computeAndGraphicsQueue.presentKHR(presentInfo);
-    totalSamplesAccumulated++;
+
+    uint32_t samplesThisFrame = SAMPLES_PER_FRAME;
+    if (!autoExportDone && totalSamplesAccumulated < targetSamples)
+    {
+        samplesThisFrame = std::min(SAMPLES_PER_FRAME, targetSamples - totalSamplesAccumulated);
+    }
+
+    totalSamplesAccumulated += samplesThisFrame;
     frameIndex = (frameIndex + 1) % MAX_FRAMES_IN_FLIGHT;
+
+    if (!autoExportDone && totalSamplesAccumulated >= targetSamples)
+    {
+        saveScreenshotAndLog("auto_benchmark");
+        autoExportDone = true;
+    }
 }
 
 void SpectralWavefrontPt::mainLoop()
 {
+    renderStartTime = std::chrono::high_resolution_clock::now();
+
     while (!glfwWindowShouldClose(window)) {
         glfwPollEvents();
         drawFrame();
@@ -1324,6 +1547,8 @@ void SpectralWavefrontPt::cleanup()
 {
     device.waitIdle();
     cleanupSwapChain();
+    stagingBuffer = nullptr;
+    stagingBufferMemory = nullptr;
     glfwDestroyWindow(window);
     glfwTerminate();
 }
@@ -1347,4 +1572,199 @@ VKAPI_ATTR vk::Bool32 VKAPI_CALL SpectralWavefrontPt::debugCallback(
 {
     std::cerr << "Validation: " << pData->pMessage << std::endl;
     return vk::False;
+}
+
+/*---------- BENCHMARK & OUTPUT SETTINGS ----------*/
+
+void SpectralWavefrontPt::createStagingBuffer()
+{
+    // 4 channels x 32 bit float
+    vk::DeviceSize bufferSize = static_cast<vk::DeviceSize>(WIDTH) * HEIGHT * 4 * sizeof(float);
+
+    vk::BufferCreateInfo bufferInfo
+    {
+        .size = bufferSize,
+        .usage = vk::BufferUsageFlagBits::eTransferDst,
+        .sharingMode = vk::SharingMode::eExclusive
+    };
+    stagingBuffer = vk::raii::Buffer(device, bufferInfo);
+
+    auto memReqs = stagingBuffer.getMemoryRequirements();
+    vk::MemoryAllocateInfo allocInfo
+    {
+        .allocationSize = memReqs.size,
+        .memoryTypeIndex = findMemoryType(
+            memReqs.memoryTypeBits,
+            vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent
+        )
+    };
+    stagingBufferMemory = vk::raii::DeviceMemory(device, allocInfo);
+    stagingBuffer.bindMemory(*stagingBufferMemory, 0);
+}
+
+void SpectralWavefrontPt::saveScreenshotAndLog(const std::string& prefix)
+{
+    device.waitIdle();
+
+    auto currentTime = std::chrono::high_resolution_clock::now();
+    double elapsedMs = std::chrono::duration<double, std::milli>(currentTime - renderStartTime).count();
+    double elapsedSec = elapsedMs / 1000.0;
+
+    // 1. One-time command buffer to copy accumulationImage (RGBA32F) to the CPU staging buffer
+    vk::CommandBufferAllocateInfo cmdAllocInfo
+    {
+        .commandPool = *commandPool,
+        .level = vk::CommandBufferLevel::ePrimary,
+        .commandBufferCount = 1
+    };
+    vk::raii::CommandBuffers tempCmds(device, cmdAllocInfo);
+    auto& cmd = tempCmds[0];
+
+    cmd.begin({ .flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit });
+
+    // Transition accumulationImage from eGeneral -> eTransferSrcOptimal
+    vk::ImageMemoryBarrier2 toSrcBarrier
+    {
+        .srcStageMask = vk::PipelineStageFlagBits2::eComputeShader,
+        .srcAccessMask = vk::AccessFlagBits2::eShaderStorageWrite,
+        .dstStageMask = vk::PipelineStageFlagBits2::eTransfer,
+        .dstAccessMask = vk::AccessFlagBits2::eTransferRead,
+        .oldLayout = vk::ImageLayout::eGeneral,
+        .newLayout = vk::ImageLayout::eTransferSrcOptimal,
+        .image = *accumulationImage,
+        .subresourceRange = { vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1 }
+    };
+    cmd.pipelineBarrier2(vk::DependencyInfo{ .imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &toSrcBarrier });
+
+    vk::BufferImageCopy copyRegion
+    {
+        .bufferOffset = 0,
+        .bufferRowLength = 0,
+        .bufferImageHeight = 0,
+        .imageSubresource = { vk::ImageAspectFlagBits::eColor, 0, 0, 1 },
+        .imageOffset = { 0, 0, 0 },
+        .imageExtent = { WIDTH, HEIGHT, 1 }
+    };
+    cmd.copyImageToBuffer(*accumulationImage, vk::ImageLayout::eTransferSrcOptimal, *stagingBuffer, copyRegion);
+
+    // Transition accumulationImage back to eGeneral for subsequent frames
+    vk::ImageMemoryBarrier2 toGenBarrier
+    {
+        .srcStageMask = vk::PipelineStageFlagBits2::eTransfer,
+        .srcAccessMask = vk::AccessFlagBits2::eTransferRead,
+        .dstStageMask = vk::PipelineStageFlagBits2::eComputeShader,
+        .dstAccessMask = vk::AccessFlagBits2::eShaderStorageRead | vk::AccessFlagBits2::eShaderStorageWrite,
+        .oldLayout = vk::ImageLayout::eTransferSrcOptimal,
+        .newLayout = vk::ImageLayout::eGeneral,
+        .image = *accumulationImage,
+        .subresourceRange = { vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1 }
+    };
+    cmd.pipelineBarrier2(vk::DependencyInfo{ .imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &toGenBarrier });
+
+    cmd.end();
+
+    vk::SubmitInfo submitInfo{ .commandBufferCount = 1, .pCommandBuffers = &*cmd };
+    computeAndGraphicsQueue.submit(submitInfo, nullptr);
+    computeAndGraphicsQueue.waitIdle();
+
+    // 2. Map 32-bit float pixels (interleaved RGBA32F)
+    const vk::DeviceSize bufferSize = static_cast<vk::DeviceSize>(WIDTH) * HEIGHT * 4 * sizeof(float);
+    auto* mappedData = static_cast<const float*>(stagingBufferMemory.mapMemory(0, bufferSize));
+
+    // 3. Separate channels into planar 32-bit float buffers and divide by sample count
+    const size_t pixelCount = static_cast<size_t>(WIDTH) * HEIGHT;
+    std::vector<float> rChannel(pixelCount);
+    std::vector<float> gChannel(pixelCount);
+    std::vector<float> bChannel(pixelCount);
+
+    const float invSamples = 1.0f / static_cast<float>(std::max(1u, totalSamplesAccumulated));
+
+    for (size_t i = 0; i < pixelCount; ++i)
+    {
+        rChannel[i] = mappedData[i * 4 + 0] * invSamples;
+        gChannel[i] = mappedData[i * 4 + 1] * invSamples;
+        bChannel[i] = mappedData[i * 4 + 2] * invSamples;
+    }
+    stagingBufferMemory.unmapMemory();
+
+    auto now = std::chrono::system_clock::now();
+    std::time_t nowTime = std::chrono::system_clock::to_time_t(now);
+    std::tm localTm{};
+#if defined(_WIN32)
+    localtime_s(&localTm, &nowTime);
+#else
+    localtime_r(&nowTime, &localTm);
+#endif
+
+    std::ostringstream timestampStream;
+    timestampStream << std::put_time(&localTm, "%Y%m%d_%H%M%S");
+    std::string timestamp = timestampStream.str();
+
+    // Ensure output directories exist so SaveEXRImageToFile doesn't fail
+    std::filesystem::create_directories("renders");
+    std::filesystem::create_directories("logs");
+
+    std::string baseName = prefix + "_" + std::to_string(totalSamplesAccumulated) + "spp_" + timestamp;
+    std::string exrFilename = "renders/" + baseName + ".exr";
+    std::string txtFilename = "logs/" + baseName + "_benchmark.txt";
+
+    EXRHeader header;
+    InitEXRHeader(&header);
+
+    EXRImage image;
+    InitEXRImage(&image);
+
+    image.num_channels = 3;
+
+    const unsigned char* imagePtr[3] = {
+        reinterpret_cast<const unsigned char*>(bChannel.data()),
+        reinterpret_cast<const unsigned char*>(gChannel.data()),
+        reinterpret_cast<const unsigned char*>(rChannel.data())
+    };
+
+    image.images = const_cast<unsigned char**>(imagePtr);
+    image.width = static_cast<int>(WIDTH);
+    image.height = static_cast<int>(HEIGHT);
+
+    header.num_channels = 3;
+    header.channels = static_cast<EXRChannelInfo*>(malloc(sizeof(EXRChannelInfo) * header.num_channels));
+    strncpy(header.channels[0].name, "B", 255);
+    strncpy(header.channels[1].name, "G", 255);
+    strncpy(header.channels[2].name, "R", 255);
+
+    header.pixel_types = static_cast<int*>(malloc(sizeof(int) * header.num_channels));
+    header.requested_pixel_types = static_cast<int*>(malloc(sizeof(int) * header.num_channels));
+    for (int i = 0; i < header.num_channels; ++i)
+    {
+        // Input arrays (rChannel, gChannel, bChannel) are 32-bit floats
+        header.pixel_types[i] = TINYEXR_PIXELTYPE_FLOAT;
+        // Request 16-bit half-float output on disk (or TINYEXR_PIXELTYPE_FLOAT for full FP32 EXR)
+        header.requested_pixel_types[i] = TINYEXR_PIXELTYPE_HALF;
+    }
+
+    header.compression_type = TINYEXR_COMPRESSIONTYPE_ZIP;
+    const char* err = nullptr;
+    int ret = SaveEXRImageToFile(&image, &header, exrFilename.c_str(), &err);
+    if (ret != TINYEXR_SUCCESS)
+    {
+        std::cerr << "[EXR Error] " << (err ? err : "Unknown") << std::endl;
+        FreeEXRErrorMessage(err);
+    }
+
+    free(header.channels);
+    free(header.pixel_types);
+    free(header.requested_pixel_types);
+
+    // 5. Write benchmark timing file
+    std::ofstream txtFile(txtFilename);
+    txtFile << "================ Rendering Benchmark ================\n";
+    txtFile << "Resolution:        " << WIDTH << " x " << HEIGHT << "\n";
+    txtFile << "Accumulated SPP:   " << totalSamplesAccumulated << "\n";
+    txtFile << "Total Time:        " << std::fixed << std::setprecision(3) << elapsedSec << " s (" << elapsedMs << " ms)\n";
+    txtFile << "Average per Sample:" << (elapsedMs / std::max(1u, totalSamplesAccumulated)) << " ms/spp\n";
+    txtFile << "Output Image:      " << exrFilename << "\n";
+    txtFile << "====================================================\n";
+    txtFile.close();
+
+    std::cout << "[Export] Saved " << exrFilename << " and " << txtFilename << std::endl;
 }
