@@ -1,0 +1,192 @@
+#usda 1.0
+(
+    defaultPrim = "CornellBoxScene"
+    upAxis = "Y"
+    metersPerUnit = 1.0
+)
+
+def Xform "CornellBoxScene"
+{
+    # -------------------------------------------------------------------------
+    # Camera (Framed at open front +Z looking toward -Z center of box)
+    # -------------------------------------------------------------------------
+    def Camera "MainCamera"
+    {
+        float focalLength = 35.0
+        float verticalAperture = 24.0
+        float horizontalAperture = 36.0
+        float2 clippingRange = (0.1, 1000.0)
+        double3 xformOp:translate = (0.0, 2.75, 10.5)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    # -------------------------------------------------------------------------
+    # Materials (OpenPBR Surface Shaders)
+    # -------------------------------------------------------------------------
+    def Scope "Materials"
+    {
+        def Material "WhiteWallMat"
+        {
+            token outputs:mtlx:surface.connect = </CornellBoxScene/Materials/WhiteWallMat/Shader.outputs:out>
+            def Shader "Shader"
+            {
+                uniform token info:id = "ND_open_pbr_surface_surfaceshader"
+                color3f inputs:base_color = (0.725, 0.71, 0.68)
+                float inputs:base_weight = 1.0
+                float inputs:base_roughness = 0.85
+                float inputs:specular_weight = 0.0
+                token outputs:out
+            }
+        }
+
+        def Material "RedWallMat"
+        {
+            token outputs:mtlx:surface.connect = </CornellBoxScene/Materials/RedWallMat/Shader.outputs:out>
+            def Shader "Shader"
+            {
+                uniform token info:id = "ND_open_pbr_surface_surfaceshader"
+                color3f inputs:base_color = (0.63, 0.065, 0.05)
+                float inputs:base_weight = 1.0
+                float inputs:base_roughness = 0.85
+                float inputs:specular_weight = 0.0
+                token outputs:out
+            }
+        }
+
+        def Material "GreenWallMat"
+        {
+            token outputs:mtlx:surface.connect = </CornellBoxScene/Materials/GreenWallMat/Shader.outputs:out>
+            def Shader "Shader"
+            {
+                uniform token info:id = "ND_open_pbr_surface_surfaceshader"
+                color3f inputs:base_color = (0.14, 0.45, 0.091)
+                float inputs:base_weight = 1.0
+                float inputs:base_roughness = 0.85
+                float inputs:specular_weight = 0.0
+                token outputs:out
+            }
+        }
+
+        def Material "CeilingLightMat"
+        {
+            token outputs:mtlx:surface.connect = </CornellBoxScene/Materials/CeilingLightMat/Shader.outputs:out>
+            def Shader "Shader"
+            {
+                uniform token info:id = "ND_open_pbr_surface_surfaceshader"
+                float inputs:base_weight = 0.0
+                float inputs:specular_weight = 0.0
+                color3f inputs:emission_color = (1.0, 0.92, 0.80)
+                float inputs:emission_luminance = 18.0
+                token outputs:out
+            }
+        }
+
+        def Material "GlassTeapotMat"
+        {
+            token outputs:mtlx:surface.connect = </CornellBoxScene/Materials/GlassTeapotMat/Shader.outputs:out>
+            def Shader "Shader"
+            {
+                uniform token info:id = "ND_open_pbr_surface_surfaceshader"
+                color3f inputs:base_color = (1.0, 1.0, 1.0)
+                float inputs:base_weight = 0.0
+                float inputs:base_metalness = 0.0
+                float inputs:specular_weight = 1.0
+                color3f inputs:specular_color = (1.0, 1.0, 1.0)
+                float inputs:specular_roughness = 0.02
+                float inputs:specular_ior = 1.52
+                float inputs:transmission_weight = 1.0
+                color3f inputs:transmission_color = (0.94, 0.99, 0.97)
+                float inputs:transmission_depth = 1.0
+                float inputs:transmission_dispersion_abbe_number = 55.0
+                float inputs:transmission_dispersion_scale = 1.0
+                token outputs:out
+            }
+        }
+    }
+
+    # -------------------------------------------------------------------------
+    # Cornell Box Geometry (5.5 x 5.5 x 5.5 room, centered X/Z, Y in [0, 5.5])
+    # -------------------------------------------------------------------------
+    def Scope "Geometry"
+    {
+        def Mesh "Floor" (prepend apiSchemas = ["MaterialBindingAPI"])
+        {
+            rel material:binding = </CornellBoxScene/Materials/WhiteWallMat>
+            int[] faceVertexCounts = [4]
+            int[] faceVertexIndices = [0, 1, 2, 3]
+            point3f[] points = [(-2.75, 0.0, 2.75), (2.75, 0.0, 2.75), (2.75, 0.0, -2.75), (-2.75, 0.0, -2.75)]
+            normal3f[] normals = [(0, 1, 0), (0, 1, 0), (0, 1, 0), (0, 1, 0)]
+            texCoord2f[] primvars:st = [(0, 0), (1, 0), (1, 1), (0, 1)] (interpolation = "vertex")
+        }
+
+        def Mesh "Ceiling" (prepend apiSchemas = ["MaterialBindingAPI"])
+        {
+            rel material:binding = </CornellBoxScene/Materials/WhiteWallMat>
+            int[] faceVertexCounts = [4]
+            int[] faceVertexIndices = [0, 1, 2, 3]
+            point3f[] points = [(-2.75, 5.5, -2.75), (2.75, 5.5, -2.75), (2.75, 5.5, 2.75), (-2.75, 5.5, 2.75)]
+            normal3f[] normals = [(0, -1, 0), (0, -1, 0), (0, -1, 0), (0, -1, 0)]
+            texCoord2f[] primvars:st = [(0, 0), (1, 0), (1, 1), (0, 1)] (interpolation = "vertex")
+        }
+
+        def Mesh "BackWall" (prepend apiSchemas = ["MaterialBindingAPI"])
+        {
+            rel material:binding = </CornellBoxScene/Materials/WhiteWallMat>
+            int[] faceVertexCounts = [4]
+            int[] faceVertexIndices = [0, 1, 2, 3]
+            point3f[] points = [(-2.75, 0.0, -2.75), (2.75, 0.0, -2.75), (2.75, 5.5, -2.75), (-2.75, 5.5, -2.75)]
+            normal3f[] normals = [(0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1)]
+            texCoord2f[] primvars:st = [(0, 0), (1, 0), (1, 1), (0, 1)] (interpolation = "vertex")
+        }
+
+        def Mesh "LeftWall_Red" (prepend apiSchemas = ["MaterialBindingAPI"])
+        {
+            rel material:binding = </CornellBoxScene/Materials/RedWallMat>
+            int[] faceVertexCounts = [4]
+            int[] faceVertexIndices = [0, 1, 2, 3]
+            point3f[] points = [(-2.75, 0.0, 2.75), (-2.75, 0.0, -2.75), (-2.75, 5.5, -2.75), (-2.75, 5.5, 2.75)]
+            normal3f[] normals = [(1, 0, 0), (1, 0, 0), (1, 0, 0), (1, 0, 0)]
+            texCoord2f[] primvars:st = [(0, 0), (1, 0), (1, 1), (0, 1)] (interpolation = "vertex")
+        }
+
+        def Mesh "RightWall_Green" (prepend apiSchemas = ["MaterialBindingAPI"])
+        {
+            rel material:binding = </CornellBoxScene/Materials/GreenWallMat>
+            int[] faceVertexCounts = [4]
+            int[] faceVertexIndices = [0, 1, 2, 3]
+            point3f[] points = [(2.75, 0.0, -2.75), (2.75, 0.0, 2.75), (2.75, 5.5, 2.75), (2.75, 5.5, -2.75)]
+            normal3f[] normals = [(-1, 0, 0), (-1, 0, 0), (-1, 0, 0), (-1, 0, 0)]
+            texCoord2f[] primvars:st = [(0, 0), (1, 0), (1, 1), (0, 1)] (interpolation = "vertex")
+        }
+
+        def Mesh "CeilingLight" (prepend apiSchemas = ["MaterialBindingAPI"])
+        {
+            rel material:binding = </CornellBoxScene/Materials/CeilingLightMat>
+            int[] faceVertexCounts = [4]
+            int[] faceVertexIndices = [0, 1, 2, 3]
+            point3f[] points = [(-0.85, 5.49, -0.85), (0.85, 5.49, -0.85), (0.85, 5.49, 0.85), (-0.85, 5.49, 0.85)]
+            normal3f[] normals = [(0, -1, 0), (0, -1, 0), (0, -1, 0), (0, -1, 0)]
+            texCoord2f[] primvars:st = [(0, 0), (1, 0), (1, 1), (0, 1)] (interpolation = "vertex")
+        }
+
+        # ---------------------------------------------------------------------
+        # Referenced Teapot with Glass Material Override
+        # ---------------------------------------------------------------------
+        def Xform "GlassTeapot" (
+            prepend apiSchemas = ["MaterialBindingAPI"]
+            prepend references = @./utah_teapot.usdc@
+        )
+        {
+            rel material:binding:allWithStrength = </CornellBoxScene/Materials/GlassTeapotMat> (
+                bindMaterialAs = "strongerThanDescendants"
+            )
+            rel material:binding = </CornellBoxScene/Materials/GlassTeapotMat> (
+                bindMaterialAs = "strongerThanDescendants"
+            )
+            double3 xformOp:translate = (0.0, 0.0, 0.2)
+            float3 xformOp:rotateXYZ = (0.0, -25.0, 0.0)
+            float3 xformOp:scale = (0.85, 0.85, 0.85)
+            uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ", "xformOp:scale"]
+        }
+    }
+}

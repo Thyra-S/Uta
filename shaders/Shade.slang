@@ -123,7 +123,8 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
 
     float3 V = -ray.direction;
     // Face-forwarded geometric normal (used for ray origin offset to prevent self-intersection)
-    float3 geoNormal = (dot(hit.normal, V) < 0.0f) ? -hit.normal : hit.normal;
+    bool isFrontFace = (dot(hit.normal, V) >= 0.0f);
+    float3 geoNormal = isFrontFace ? hit.normal : -hit.normal;
     float3 normal = geoNormal;
 
     // Tangent-space normal map override
@@ -140,13 +141,13 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
         }
     }
 
-    float3 baseRgb = mat.baseColorCoeffs.rgb;
+    float3 baseRgb = mat.baseColor.rgb;
     if (mat.baseColorTexId != 0xFFFFFFFFu)
     {
         baseRgb *= g_Textures[NonUniformResourceIndex(mat.baseColorTexId)].SampleLevel(hit.uv, 0.0f).rgb;
     }
     float4 baseReflectance = rgbToSpectrum4(baseRgb, ray.wavelengths);
-    float4 specReflectance = rgbToSpectrum4(mat.specularColorCoeffs.rgb, ray.wavelengths);
+    float4 specReflectance = rgbToSpectrum4(mat.specularColor.rgb, ray.wavelengths);
 
     // Specular & Coat Roughness texture overrides
     if (mat.specularRoughnessTexId != 0xFFFFFFFFu)
@@ -168,11 +169,109 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
         g_AccumulationImage[pixelCoord] += float4(emittedRgb, 0.0f);
 
         // Terminate pure non-scattering emissive surfaces
-        if (mat.baseWeight <= 1e-4f && mat.specularWeight <= 1e-4f)
+        if (mat.baseWeight <= 1e-4f && mat.specularWeight <= 1e-4f && mat.transmissionWeight <= 1e-4f)
         {
             terminateRay(rayIndex, ray);
             return;
         }
+    }
+
+    // ------------------------------------------------------------------------
+    // 3.5 Transmissive Dielectric Lobe (Refraction + Cauchy Dispersion)
+    // ------------------------------------------------------------------------
+    if (mat.transmissionWeight > 0.0f && mat.baseMetalness < 0.5f)
+    {
+        // 1. Compute wavelength-dependent IOR via Cauchy dispersion (centered at 587.6 nm)
+        float ior = max(1.001f, mat.specularIor);
+        if (mat.transmissionScatterAndDispersion.w > 0.0f)
+        {
+            float abbe = mat.transmissionScatterAndDispersion.w;
+            float lambdaUm = ray.wavelengths.x * 1e-3f; // Hero wavelength in micrometers
+            float B = (ior - 1.0f) / (abbe * (1.0f / (0.4861f * 0.4861f) - 1.0f / (0.6563f * 0.6563f)));
+            ior = ior + B * (1.0f / (lambdaUm * lambdaUm) - 1.0f / (0.5876f * 0.5876f));
+        }
+
+        // 2. Incident (ni) and transmitted (nt) IORs flip depending on entering vs exiting
+        float ni = isFrontFace ? 1.0f : ior;
+        float nt = isFrontFace ? ior : 1.0f;
+        float eta = ni / nt;
+
+        // 3. Sample microfacet normal H (uses smooth surface normal if roughness is near 0)
+        float roughness = clamp(mat.specularRoughness, 0.001f, 1.0f);
+        float alpha = roughness * roughness;
+        float3 H = normal;
+
+        if (alpha >= 0.002f)
+        {
+            float2 u = randomFloat2(seed);
+            float a2 = alpha * alpha;
+            float phi = 2.0f * 3.1415926535f * u.x;
+            float cosThetaH = sqrt((1.0f - u.y) / max(1e-7f, 1.0f + (a2 - 1.0f) * u.y));
+            float sinThetaH = sqrt(max(0.0f, 1.0f - cosThetaH * cosThetaH));
+            H = normalize(toWorld(float3(sinThetaH * cos(phi), sinThetaH * sin(phi), cosThetaH), normal));
+        }
+
+        // 4. Exact Fresnel reflectance & refraction direction
+        float VdotH = clamp(dot(V, H), 0.0f, 1.0f);
+        float F_exact = evalExactDielectricFresnel(VdotH, ni, nt);
+        float3 refDir = refract(-V, H, eta);
+        bool tir = (F_exact >= 0.9999f) || (dot(refDir, refDir) < 1e-6f);
+
+        // Probability of choosing reflection vs refraction
+        float pRefl = tir ? 1.0f : clamp(F_exact * mat.specularWeight, 0.02f, 0.98f);
+
+        float3 nextDir;
+        float3 originOffset;
+
+        if (randomFloat(seed) < pRefl)
+        {
+            // REFLECT: Stay on the same side of the surface (+geoNormal)
+            nextDir = reflect(-V, H);
+            originOffset = geoNormal * 1e-3f;
+            ray.throughput *= (F_exact * mat.specularWeight) / pRefl;
+        }
+        else
+        {
+            // REFRACT: Cross through the boundary to the other side (-geoNormal)
+            nextDir = normalize(refDir);
+            originOffset = -geoNormal * 1e-3f;
+
+            // Apply spectral glass transmission color tint
+            float4 transSpec = rgbToSpectrum4(mat.transmissionColor.rgb, ray.wavelengths);
+            if (isFrontFace)
+            {
+                ray.throughput *= transSpec;
+            }
+            ray.throughput *= (1.0f - F_exact) / (1.0f - pRefl);
+        }
+
+        // 5. Russian Roulette on deep internal bounces
+        if (params.currentBounce >= 5)
+        {
+            float maxT = max(ray.throughput.x, max(ray.throughput.y, max(ray.throughput.z, ray.throughput.w)));
+            float q = clamp(maxT, 0.05f, 0.98f);
+            if (randomFloat(seed) > q)
+            {
+                terminateRay(rayIndex, ray);
+                return;
+            }
+            ray.throughput /= q;
+        }
+
+        // 6. Advance ray state for next bounce and return early (skip opaque lobes)
+        ray.origin = hit.worldPos + originOffset;
+        ray.direction = nextDir;
+        ray.tMin = 1e-3f;
+        ray.tMax = 10000.0f;
+        ray.bounceCount += 1;
+
+        if (ray.bounceCount >= params.maxBounces)
+        {
+            ray.isTerminated = 1;
+        }
+
+        g_RayQueue[rayIndex] = ray;
+        return;
     }
 
     // 4. OpenPBR Multi-Lobe Energy Partitioning

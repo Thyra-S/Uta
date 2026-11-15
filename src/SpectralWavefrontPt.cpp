@@ -699,66 +699,12 @@ void SpectralWavefrontPt::createScene(const std::string& modelPath, const std::s
     instances.clear();
     materials.clear();
 
-    camera.position = glm::vec3(0.0f, 2.0f, 8.0f);
-    camera.target = glm::vec3(0.0f, 2.0f, 0.0f);
-    camera.up = glm::vec3(0.0f, 1.0f, 0.0f);
-    camera.fovY = 45.0f;
-
     std::vector<CpuTextureData> cpuTextures;
     std::unordered_map<std::string, uint32_t> textureCache;
-
-    // 1. Load primary material from materialPath (or fallback to materials/ceramic.mtlx) -> Index 0
-    std::string primaryMtlx = (!materialPath.empty() && std::filesystem::exists(materialPath))
-        ? materialPath
-        : "materials/ceramic.mtlx";
-    materials.push_back(loadOpenPbrFromMtlx(primaryMtlx, cpuTextures, textureCache)); // Index 0
-
-    // 2. Load scene materials from .mtlx files -> Index 1 & Index 2
-    materials.push_back(loadOpenPbrFromMtlx("materials/matte_floor.mtlx", cpuTextures, textureCache)); // Index 1
-    materials.push_back(loadOpenPbrFromMtlx("materials/gold.mtlx", cpuTextures, textureCache));        // Index 2
 
     // 3. Load USD scene geometry, camera, and any USD-authored materials/textures
     //    (Meshes without a USD material binding default to materialId = 0, i.e., primaryMtlx)
     loadUsdScene(modelPath, meshes, instances, materials, cpuTextures, camera);
-
-    // 4. Base Ground Quad Geometry (Shared Mesh & BLAS)
-    MeshGeometry groundMesh{};
-    float planeSize = 100.0f;
-    float groundY = 0.0f;
-
-    groundMesh.vertices = {
-        glm::vec3(-planeSize, groundY, -planeSize),
-        glm::vec3(planeSize, groundY, -planeSize),
-        glm::vec3(planeSize, groundY,  planeSize),
-        glm::vec3(-planeSize, groundY,  planeSize)
-    };
-
-    VertexAttributes normAttr{ .norm = glm::vec3(0.0f, 1.0f, 0.0f), .uv = glm::vec2(0.0f) };
-    groundMesh.attributes = { normAttr, normAttr, normAttr, normAttr };
-    groundMesh.indices = { 0, 2, 1, 0, 3, 2 };
-
-    uint32_t groundMeshIndex = static_cast<uint32_t>(meshes.size());
-    meshes.push_back(std::move(groundMesh));
-
-    // Instance A: Standard Base Ground Plane (Material 1: matte_floor.mtlx)
-    instances.push_back(SceneInstance{
-        .meshIndex = groundMeshIndex,
-        .transform = glm::mat4(1.0f),
-        .customInstanceId = static_cast<uint32_t>(instances.size()),
-        .materialId = 1
-        });
-
-    // Instance B: Separate Transformed Plane (Material 2: gold.mtlx)
-    glm::mat4 goldTransform = glm::translate(glm::mat4(1.0f), glm::vec3(6.0f, 0.05f, -6.0f)) *
-        glm::rotate(glm::mat4(1.0f), glm::radians(45.0f), glm::vec3(1.0f, 0.0f, 0.0f)) *
-        glm::scale(glm::mat4(1.0f), glm::vec3(0.05f, 0.05f, 0.05f));
-
-    instances.push_back(SceneInstance{
-        .meshIndex = groundMeshIndex,
-        .transform = goldTransform,
-        .customInstanceId = static_cast<uint32_t>(instances.size()),
-        .materialId = 2
-        });
 
     // 5. Upload all discovered textures to GPU
     createSceneTextures(cpuTextures);
@@ -1308,7 +1254,7 @@ void SpectralWavefrontPt::recordWavefrontCommands(uint32_t imageIndex)
         .height = HEIGHT,
         .frameCounter = totalSamplesAccumulated,
         .currentBounce = 0,
-        .maxBounces = 8,
+        .maxBounces = 16,
         .totalPixels = WIDTH * HEIGHT,
 		.pad0 = isScRgb ? 1u : 0u,
     };

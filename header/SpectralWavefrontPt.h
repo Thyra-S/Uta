@@ -93,9 +93,8 @@ namespace WavefrontData
         uint32_t  maxBounces{ 8 };
 
         uint32_t  totalPixels{ 1920 * 1080 };
-        uint32_t  pad0{ 0 };
-        uint32_t  pad1{ 0 };
-        uint32_t  pad2{ 0 };
+		uint64_t  lightBufferAddress{ 0 };
+		uint32_t  lightcount{ 0 };
     };
 
     struct alignas(16) GpuMeshDesc {
@@ -116,7 +115,7 @@ namespace WavefrontData
     {
         /* ------------------BASE LOBE------------------ */
         // Polynomial coeffs (c0, c1, c2, scale)
-        glm::vec4 baseColorCoeffs{ 1.0f, 1.0f, 1.0f, 1.0f };
+        glm::vec4 baseColor{ 1.0f, 1.0f, 1.0f, 1.0f };
 
         // Packed 16-byte block (4 x 32-bit floats)
         float     baseWeight{ 1.0f };
@@ -126,7 +125,7 @@ namespace WavefrontData
 
         /* ------------------ SPECULAR LOBE ------------------ */
         // Dielectric tint or Conductor edge tint (c0, c1, c2, scale)
-        glm::vec4 specularColorCoeffs{ 1.0f, 1.0f, 1.0f, 1.0f };
+        glm::vec4 specularColor{ 1.0f, 1.0f, 1.0f, 1.0f };
 
         // Packed 16-byte block (4 x 32-bit floats)
         float     specularWeight{ 1.0f };
@@ -135,7 +134,7 @@ namespace WavefrontData
         float     specularRoughnessAnisotropy{ 0.0f };
 
         /* ------------------TRANSMISSION LOBE------------------ */
-        glm::vec4 transmissionColorCoeffs{ 1.0f, 1.0f, 1.0f, 1.0f };
+        glm::vec4 transmissionColor{ 1.0f, 1.0f, 1.0f, 1.0f };
 
         // xyz = scatter coeffs, w = dispersion (Sellmeier / Abbe v)
         glm::vec4 transmissionScatterAndDispersion{ 0.0f, 0.0f, 0.0f, 0.0f };

@@ -128,20 +128,20 @@ WavefrontData::GpuOpenPbrMaterial loadOpenPbrFromMtlx(
             mat.normalTexId = getTexId("geometry_normal", false);
 
             glm::vec3 defaultBaseCol = (mat.baseColorTexId != ~0u) ? glm::vec3(1.0f) : glm::vec3(0.8f);
-            mat.baseColorCoeffs = glm::vec4(getColor3("base_color", defaultBaseCol), 1.0f); mat.baseWeight = getFloat("base_weight", 1.0f);
+            mat.baseColor = glm::vec4(getColor3("base_color", defaultBaseCol), 1.0f); mat.baseWeight = getFloat("base_weight", 1.0f);
             mat.baseRoughness = getFloat("base_roughness", 0.3f);
             mat.baseMetalness = getFloat("base_metalness", 0.0f);
             mat.baseDiffuseRoughness = getFloat("base_diffuse_roughness", 0.0f);
 
             // 2. Specular Lobe
-            mat.specularColorCoeffs = glm::vec4(getColor3("specular_color", glm::vec3(1.0f)), 1.0f);
+            mat.specularColor = glm::vec4(getColor3("specular_color", glm::vec3(1.0f)), 1.0f);
             mat.specularWeight = getFloat("specular_weight", 1.0f);
             mat.specularRoughness = getFloat("specular_roughness", 0.3f);
             mat.specularIor = getFloat("specular_ior", 1.5f);
             mat.specularRoughnessAnisotropy = getFloat("specular_roughness_anisotropy", 0.0f);
 
             // 3. Transmission Lobe
-            mat.transmissionColorCoeffs = glm::vec4(getColor3("transmission_color", glm::vec3(1.0f)), 1.0f);
+            mat.transmissionColor = glm::vec4(getColor3("transmission_color", glm::vec3(1.0f)), 1.0f);
             glm::vec3 transScatter = getColor3("transmission_scatter", glm::vec3(0.0f));
             float abbeNumber = getFloat("transmission_dispersion_abbe_number", 0.0f);
             float dispScale = getFloat("transmission_dispersion_scale", 0.0f);
@@ -258,13 +258,16 @@ static uint32_t resolveUsdMaterial(
     if (surfaceShader) {
         // Case 1: External .mtlx asset referenced directly by the USD shader
         pxr::SdfAssetPath sourceAsset;
-        if (surfaceShader.GetSourceAsset(&sourceAsset, pxr::TfToken("mtlx"))) {
+        if (surfaceShader.GetSourceAsset(&sourceAsset, pxr::TfToken("mtlx"))) 
+        {
             std::string resolvedMtlx = sourceAsset.GetResolvedPath();
-            if (!resolvedMtlx.empty()) {
+            if (!resolvedMtlx.empty()) 
+            {
                 mat = loadOpenPbrFromMtlx(resolvedMtlx, outTextures, textureCache);
             }
         }
-        else {
+        else 
+        {
             pxr::TfToken shaderId;
             surfaceShader.GetShaderId(&shaderId);
 
@@ -274,10 +277,12 @@ static uint32_t resolveUsdMaterial(
             uint32_t texId = ~0u;
 
             // Case 2: OpenPBR authored directly in USD (UsdMtlx)
-            if (shaderId == pxr::TfToken("ND_open_pbr_surface_surfaceshader")) {
-                if (readUsdInputOrTexture(surfaceShader, "base_color", true, colVal, texId, outTextures, textureCache)) {
+            if (shaderId == pxr::TfToken("ND_open_pbr_surface_surfaceshader")) 
+            {
+                if (readUsdInputOrTexture(surfaceShader, "base_color", true, colVal, texId, outTextures, textureCache)) 
+                {
                     if (texId != ~0u) mat.baseColorTexId = texId;
-                    else mat.baseColorCoeffs = glm::vec4(colVal[0], colVal[1], colVal[2], 1.0f);
+                    else mat.baseColor = glm::vec4(colVal[0], colVal[1], colVal[2], 1.0f);
                 }
                 if (readUsdInputOrTexture(surfaceShader, "base_weight", false, fltVal, texId, outTextures, textureCache) && texId == ~0u)
                     mat.baseWeight = fltVal;
@@ -285,7 +290,8 @@ static uint32_t resolveUsdMaterial(
                     mat.baseRoughness = fltVal;
                 if (readUsdInputOrTexture(surfaceShader, "base_metalness", false, fltVal, texId, outTextures, textureCache) && texId == ~0u)
                     mat.baseMetalness = fltVal;
-                if (readUsdInputOrTexture(surfaceShader, "specular_roughness", false, fltVal, texId, outTextures, textureCache)) {
+                if (readUsdInputOrTexture(surfaceShader, "specular_roughness", false, fltVal, texId, outTextures, textureCache)) 
+                {
                     if (texId != ~0u) mat.specularRoughnessTexId = texId;
                     else mat.specularRoughness = fltVal;
                 }
@@ -295,7 +301,8 @@ static uint32_t resolveUsdMaterial(
                     mat.transmissionWeight = fltVal;
                 if (readUsdInputOrTexture(surfaceShader, "coat_weight", false, fltVal, texId, outTextures, textureCache) && texId == ~0u)
                     mat.coatWeight = fltVal;
-                if (readUsdInputOrTexture(surfaceShader, "coat_roughness", false, fltVal, texId, outTextures, textureCache)) {
+                if (readUsdInputOrTexture(surfaceShader, "coat_roughness", false, fltVal, texId, outTextures, textureCache)) 
+                {
                     if (texId != ~0u) mat.coatRoughnessTexId = texId;
                     else mat.coatRoughness = fltVal;
                 }
@@ -303,16 +310,37 @@ static uint32_t resolveUsdMaterial(
                     mat.normalTexId = texId;
                 if (readUsdInputOrTexture(surfaceShader, "geometry_thin_walled", false, boolVal, texId, outTextures, textureCache) && texId == ~0u)
                     mat.thinWalled = boolVal ? 1u : 0u;
+                if (readUsdInputOrTexture(surfaceShader, "transmission_color", true, colVal, texId, outTextures, textureCache) && texId == ~0u)
+                    mat.transmissionColor = glm::vec4(colVal[0], colVal[1], colVal[2], 1.0f);
+                if (readUsdInputOrTexture(surfaceShader, "transmission_depth", false, fltVal, texId, outTextures, textureCache) && texId == ~0u)
+                    mat.transmissionDepth = fltVal;
+                if (readUsdInputOrTexture(surfaceShader, "transmission_dispersion_abbe_number", false, fltVal, texId, outTextures, textureCache) && texId == ~0u)
+                    mat.transmissionScatterAndDispersion.w = fltVal;
+
+                if (readUsdInputOrTexture(surfaceShader, "emission_color", true, colVal, texId, outTextures, textureCache) && texId == ~0u) 
+                {
+                    mat.emissionAndLuminance.x = colVal[0];
+                    mat.emissionAndLuminance.y = colVal[1];
+                    mat.emissionAndLuminance.z = colVal[2];
+                }
+                if (readUsdInputOrTexture(surfaceShader, "emission_luminance", false, fltVal, texId, outTextures, textureCache) && texId == ~0u) 
+                {
+                    mat.emissionAndLuminance.w = fltVal;
+                }
             }
             // Case 3: UsdPreviewSurface mapped to OpenPBR
-            else {
-                if (readUsdInputOrTexture(surfaceShader, "diffuseColor", true, colVal, texId, outTextures, textureCache)) {
+            else 
+            {
+                if (readUsdInputOrTexture(surfaceShader, "diffuseColor", true, colVal, texId, outTextures, textureCache)) 
+                {
                     if (texId != ~0u) mat.baseColorTexId = texId;
-                    else mat.baseColorCoeffs = glm::vec4(colVal[0], colVal[1], colVal[2], 1.0f);
+                    else mat.baseColor = glm::vec4(colVal[0], colVal[1], colVal[2], 1.0f);
                 }
-                if (readUsdInputOrTexture(surfaceShader, "roughness", false, fltVal, texId, outTextures, textureCache)) {
+                if (readUsdInputOrTexture(surfaceShader, "roughness", false, fltVal, texId, outTextures, textureCache)) 
+                {
                     if (texId != ~0u) mat.specularRoughnessTexId = texId;
-                    else {
+                    else 
+                    {
                         mat.baseRoughness = fltVal;
                         mat.specularRoughness = fltVal;
                     }
@@ -325,13 +353,15 @@ static uint32_t resolveUsdMaterial(
                     mat.transmissionWeight = 1.0f - fltVal;
                 if (readUsdInputOrTexture(surfaceShader, "clearcoat", false, fltVal, texId, outTextures, textureCache) && texId == ~0u)
                     mat.coatWeight = fltVal;
-                if (readUsdInputOrTexture(surfaceShader, "clearcoatRoughness", false, fltVal, texId, outTextures, textureCache)) {
+                if (readUsdInputOrTexture(surfaceShader, "clearcoatRoughness", false, fltVal, texId, outTextures, textureCache)) 
+                {
                     if (texId != ~0u) mat.coatRoughnessTexId = texId;
                     else mat.coatRoughness = fltVal;
                 }
                 if (readUsdInputOrTexture(surfaceShader, "normal", false, colVal, texId, outTextures, textureCache) && texId != ~0u)
                     mat.normalTexId = texId;
-                if (readUsdInputOrTexture(surfaceShader, "emissiveColor", true, colVal, texId, outTextures, textureCache) && texId == ~0u) {
+                if (readUsdInputOrTexture(surfaceShader, "emissiveColor", true, colVal, texId, outTextures, textureCache) && texId == ~0u) 
+                {
                     float maxC = std::max({ colVal[0], colVal[1], colVal[2] });
                     mat.emissionAndLuminance = glm::vec4(colVal[0], colVal[1], colVal[2], maxC > 0.0f ? 1.0f : 0.0f);
                 }
@@ -363,7 +393,7 @@ void loadUsdScene(const std::string& filepath,
     // Ensure index 0 is always a valid fallback default material
     if (outMaterials.empty()) {
         WavefrontData::GpuOpenPbrMaterial defaultMat{};
-        defaultMat.baseColorCoeffs = glm::vec4(0.8f, 0.8f, 0.8f, 1.0f);
+        defaultMat.baseColor = glm::vec4(0.8f, 0.8f, 0.8f, 1.0f);
         outMaterials.push_back(defaultMat);
     }
 

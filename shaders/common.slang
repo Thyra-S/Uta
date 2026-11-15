@@ -8,21 +8,21 @@ module Common;
 public struct GpuOpenPbrMaterial
 {
     // Base Lobe
-    public float4 baseColorCoeffs;
+    public float4 baseColor;
     public float  baseWeight;
     public float  baseRoughness;
     public float  baseMetalness;
     public float  baseDiffuseRoughness;
 
     // Specular Lobe
-    public float4 specularColorCoeffs;
+    public float4 specularColor;
     public float  specularWeight;
     public float  specularRoughness;
     public float  specularIor;
     public float  specularRoughnessAnisotropy;
 
     // Transmission Lobe
-    public float4 transmissionColorCoeffs;
+    public float4 transmissionColor;
     public float4 transmissionScatterAndDispersion;
     public float  transmissionWeight;
     public float  transmissionDepth;
@@ -218,6 +218,23 @@ public float4 evalFresnelDielectric(float cosTheta, float ior, float4 tint)
     return tint * schlick;
 }
 
+// Exact unpolarized dielectric Fresnel (returns 1.0 on Total Internal Reflection)
+public float evalExactDielectricFresnel(float cosThetaI, float ni, float nt)
+{
+    float eta = ni / nt;
+    float sinThetaI2 = max(0.0f, 1.0f - cosThetaI * cosThetaI);
+    float sinThetaT2 = eta * eta * sinThetaI2;
+
+    // Total Internal Reflection (ray cannot escape glass into air)
+    if (sinThetaT2 >= 1.0f)
+        return 1.0f;
+
+    float cosThetaT = sqrt(max(0.0f, 1.0f - sinThetaT2));
+    float rParl = (nt * cosThetaI - ni * cosThetaT) / (nt * cosThetaI + ni * cosThetaT);
+    float rPerp = (ni * cosThetaI - nt * cosThetaT) / (ni * cosThetaI + nt * cosThetaT);
+    return 0.5f * (rParl * rParl + rPerp * rPerp);
+}
+
 // Analytic smooth RGB-to-spectral reflectance conversion across 4 wavelengths
 public float4 rgbToSpectrum4(float3 rgb, float4 wavelengths)
 {
@@ -229,7 +246,7 @@ public float4 rgbToSpectrum4(float3 rgb, float4 wavelengths)
     if (abs(normRgb.r - normRgb.g) < 1e-4f && abs(normRgb.g - normRgb.b) < 1e-4f)
         return float4(normRgb.g * maxVal);
 
-    float3 c = clamp(normRgb, 0.001f, 0.999f);
+    float3 c = clamp(normRgb, 0.001f, 0.9f);
     float3 u = 2.0f * c - 1.0f;
     float3 p = u / sqrt(max(float3(1e-4f), 1.0f - u * u));
 

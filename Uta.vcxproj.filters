@@ -52,5 +52,6 @@
     <None Include="materials\ceramic.mtlx" />
     <None Include="materials\matte_floor.mtlx" />
     <None Include="materials\gold.mtlx" />
+    <None Include="models\cornell_glass_teapot.usda" />
   </ItemGroup>
 </Project>

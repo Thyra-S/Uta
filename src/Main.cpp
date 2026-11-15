@@ -2,7 +2,7 @@
 
 int main(int argc, char* argv[])
 {
-    std::string modelPath = (argc > 1) ? argv[1] : "models/utah_teapot.usda";
+    std::string modelPath = (argc > 1) ? argv[1] : "models/cornell_glass_teapot.usda";
     std::string materialPath = (argc > 2) ? argv[2] : "";
     try {
         SpectralWavefrontPt app;
