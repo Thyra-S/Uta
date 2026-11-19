@@ -60,14 +60,47 @@ public struct RayPayload
     public float3 direction;
     public float  tMax;
 
-    public float4 wavelengths;
     public float4 throughput;
 
+    public float  hero;
     public uint   pixelIndex;
-    public uint   bounceCount;
-    public uint   isTerminated;
-    public uint   padding;
+    public uint   bounceCount; // 2 MSB are used for flags: Specular Bounce (bit 31) and Terminated (bit 30)
+    public float  prevBsdfPdf;
 };
+
+//============================================================================
+// Ray Payload Bitfield Utilities
+//============================================================================
+public static const uint RAY_FLAG_SPECULAR = (1u << 31);
+public static const uint RAY_FLAG_TERMINATED = (1u << 30);
+public static const uint RAY_BOUNCE_MASK = 0x3FFFFFFFu;
+
+public bool isRayTerminated(uint packedBounce) { return (packedBounce & RAY_FLAG_TERMINATED) != 0u; }
+public bool isSpecularBounce(uint packedBounce) { return (packedBounce & RAY_FLAG_SPECULAR) != 0u; }
+public uint getBounceCount(uint packedBounce) { return (packedBounce & RAY_BOUNCE_MASK); }
+
+public void setRayTerminated(inout uint packedBounce)
+{
+    packedBounce |= RAY_FLAG_TERMINATED;
+}
+
+public void setSpecularBounce(inout uint packedBounce, bool isSpec)
+{
+    if (isSpec) packedBounce |= RAY_FLAG_SPECULAR;
+    else packedBounce &= ~RAY_FLAG_SPECULAR;
+}
+
+public void incrementBounceCount(inout uint packedBounce)
+{
+    uint count = (packedBounce & RAY_BOUNCE_MASK) + 1u;
+    packedBounce = (packedBounce & ~RAY_BOUNCE_MASK) | (count & RAY_BOUNCE_MASK);
+}
+
+public float4 getWavelengths(float hero)
+{
+    float4 offsets = float4(0.0f, 100.0f, 200.0f, 300.0f);
+    return 380.0f + fmod((hero - 380.0f) + offsets, 400.0f);
+}
 
 public struct HitPayload
 {
@@ -103,8 +136,21 @@ public struct SceneParams
 
     public uint     totalPixels;
     public uint     pad0;
+
+    public uint64_t lightBufferAddress;
+    public uint     lightCount;
     public uint     pad1;
-    public uint     pad2;
+};
+
+public struct GpuEmissiveTriangle
+{
+    public float3 v0;
+    public float area;
+    public float3 v1;
+    public float luminance;
+    public float3 v2;
+    public uint materialId;
+    public float4 emissionColor;
 };
 
 public struct GpuMeshDesc
@@ -301,5 +347,5 @@ public float3 spectral4ToLinearRgb(float4 radiance, float4 wavelengths)
     rgb.g = -0.9692660f * xyz.x + 1.8760108f * xyz.y + 0.0415560f * xyz.z;
     rgb.b =  0.0556434f * xyz.x - 0.2040259f * xyz.y + 1.0572252f * xyz.z;
 
-    return max(float3(0.0f), rgb);
+    return rgb;
 }

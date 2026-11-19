@@ -21,7 +21,7 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
     RayPayload ray = g_RayQueue[rayIndex];
     HitPayload hit = (HitPayload)0; // hitStatus = 0 defaults to Miss/Environment
 
-    if (ray.isTerminated != 0)
+    if (isRayTerminated(ray.bounceCount))
     {
         return;
     }
@@ -66,24 +66,36 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
             indices[hit.primitiveId * 3 + 1],
             indices[hit.primitiveId * 3 + 2]
         );
+        float3 *positions = (float3 *)mesh.positionBufferAddress;
+        float3 localGeomNormal = cross(
+            positions[tri.y] - positions[tri.x],
+            positions[tri.z] - positions[tri.x]
+        );
+        float3 worldGeomNormal = normalize(mul(worldMat, localGeomNormal));
 
-        VertexAttributes* attrs = (VertexAttributes*)mesh.attributtesBufferAddress;
+        VertexAttributes *attrs = (VertexAttributes *)mesh.attributtesBufferAddress;
         float w0 = 1.0f - hit.uv.x - hit.uv.y;
         float3 localNormal = attrs[tri.x].norm * w0
                            + attrs[tri.y].norm * hit.uv.x
                            + attrs[tri.z].norm * hit.uv.y;
 
-        // Geometric fallback if vertex normals are unpopulated
         if (dot(localNormal, localNormal) < 1e-6f)
         {
-            float3* positions = (float3*)mesh.positionBufferAddress;
-            localNormal = cross(
-                positions[tri.y] - positions[tri.x],
-                positions[tri.z] - positions[tri.x]
-            );
+            localNormal = localGeomNormal;
         }
 
-        hit.normal = normalize(mul(worldMat, localNormal));
+        float3 worldShadingNormal = normalize(mul(worldMat, localNormal));
+
+        // Ensure smooth shading normal agrees with the true polygon winding
+        if (dot(worldShadingNormal, worldGeomNormal) < 0.0f)
+        {
+            worldShadingNormal = -worldShadingNormal;
+        }
+
+        // True front-face test using polygon winding, stored in hit.padding
+        bool isFrontFace = (dot(worldGeomNormal, -ray.direction) >= 0.0f);
+        hit.normal = isFrontFace ? worldShadingNormal : -worldShadingNormal;
+        hit.padding = isFrontFace ? 1u : 0u;
     }
 
     g_HitQueue[rayIndex] = hit;

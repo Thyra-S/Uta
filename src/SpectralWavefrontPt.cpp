@@ -709,7 +709,71 @@ void SpectralWavefrontPt::createScene(const std::string& modelPath, const std::s
     // 5. Upload all discovered textures to GPU
     createSceneTextures(cpuTextures);
 
+	createEmissiveTriangleBuffer();
     updateCameraMatrices();
+}
+
+void SpectralWavefrontPt::createEmissiveTriangleBuffer()
+{
+    std::vector<WavefrontData::GpuEmissiveTriangle> emissiveTriangles;
+    for (const auto& inst : instances)
+    {
+        const auto& material = materials[inst.materialId];
+        if (material.emissionAndLuminance.w <= 0.0f)
+            continue; // Skip non-emissive instances
+
+        const auto& mesh = meshes[inst.meshIndex];
+        for (size_t i = 0; i < mesh.indices.size(); i += 3)
+        {
+            uint32_t idx0 = mesh.indices[i];
+            uint32_t idx1 = mesh.indices[i + 1];
+            uint32_t idx2 = mesh.indices[i + 2];
+            const auto& v0 = glm::vec3(inst.transform * glm::vec4(mesh.vertices[idx0], 1.0f));
+            const auto& v1 = glm::vec3(inst.transform * glm::vec4(mesh.vertices[idx1], 1.0f));
+            const auto& v2 = glm::vec3(inst.transform * glm::vec4(mesh.vertices[idx2], 1.0f));
+            // Compute triangle area and normal
+            glm::vec3 edge1 = v1 - v0;
+            glm::vec3 edge2 = v2 - v0;
+            float area = 0.5f * glm::length(glm::cross(edge1, edge2));
+
+            WavefrontData::GpuEmissiveTriangle emissiveTri
+            {
+                .v0            = v0,
+                .area          = area,
+                .v1            = v1,
+                .luminance     = material.emissionAndLuminance.w,
+                .v2            = v2,
+                .materialId    = inst.materialId,
+                .emissionColor = {glm::vec3(material.emissionAndLuminance) * material.emissionAndLuminance.w, 0.0f} // Pad to vec4
+            };
+            emissiveTriangles.push_back(emissiveTri);
+        }
+    }
+
+    emissiveTriangleCount = static_cast<uint32_t>(emissiveTriangles.size());
+    if (emissiveTriangles.empty())
+    {
+        WavefrontData::GpuEmissiveTriangle emissiveTri
+        {
+            .v0            = {0.0f, 0.0f, 0.0f},
+            .area          = 0.0f,
+            .v1            = {0.0f, 0.0f, 0.0f},
+            .luminance     = 0.0f,
+            .v2            = {0.0f, 0.0f, 0.0f},
+            .materialId    = 0,
+            .emissionColor = {0.0f, 0.0f, 0.0f, 0.0f} // Pad to vec4
+        };
+        emissiveTriangles.push_back(emissiveTri);
+    }
+
+    const vk::DeviceSize bufferSize = emissiveTriangles.size() * sizeof(WavefrontData::GpuEmissiveTriangle);
+    createDeviceLocalBuffer(
+        emissiveTriangles.data(),
+        bufferSize,
+        vk::BufferUsageFlagBits::eStorageBuffer,
+        emissiveTriangleBuffer,
+        emissiveTriangleMemory);
+    emissiveTriangleBufferAddress = device.getBufferAddress({ .buffer = *emissiveTriangleBuffer });
 }
 
 void SpectralWavefrontPt::createAccelerationStructures()
@@ -1256,7 +1320,10 @@ void SpectralWavefrontPt::recordWavefrontCommands(uint32_t imageIndex)
         .currentBounce = 0,
         .maxBounces = 16,
         .totalPixels = WIDTH * HEIGHT,
-		.pad0 = isScRgb ? 1u : 0u,
+        .pad0 = isScRgb ? 1u : 0u,
+        .lightBufferAddress = emissiveTriangleBufferAddress,
+        .lightCount = emissiveTriangleCount,
+        .pad1 = 0,
     };
 
     cmd.bindDescriptorSets(vk::PipelineBindPoint::eCompute, *computePipelineLayout, 0, *descriptorSets[0], nullptr);

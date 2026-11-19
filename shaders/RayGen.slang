@@ -49,20 +49,7 @@ void generatePerspectiveRay(
     // 3. Transform lens origin and ray direction to World Space
     float3 rayDirView = normalize(focusPointView - lensOffsetView);
     rayOrigin = mul(params.invView, float4(lensOffsetView, 1.0f)).xyz;
-    rayDir    = mul(params.invView, float4(rayDirView, 0.0f)).xyz;
-}
-
-float4 generateWavelengths(float hero, float2 spectrum)
-{
-    float span = spectrum.y - spectrum.x;
-    float step = span * 0.25f;
-
-    return float4(
-        hero,
-        fmod(hero - spectrum.x + 1.0f * step, span) + spectrum.x,
-        fmod(hero - spectrum.x + 2.0f * step, span) + spectrum.x,
-        fmod(hero - spectrum.x + 3.0f * step, span) + spectrum.x
-    );
+    rayDir = mul(params.invView, float4(rayDirView, 0.0f)).xyz;
 }
 
 [shader("compute")]
@@ -92,12 +79,11 @@ void main(uint3 dispatchThreadID: SV_DispatchThreadID)
     ray.tMin         = 0.001f;
     ray.direction    = rayDir;
     ray.tMax         = 10000.0f;
-    ray.wavelengths  = generateWavelengths(heroWavelength, visibleSpectrum);
+    ray.hero         = heroWavelength;
     ray.throughput   = float4(1.0f);
     ray.pixelIndex   = rayIndex;
-    ray.bounceCount  = 0;
-    ray.isTerminated = 0;
-    ray.padding      = 0;
+    ray.bounceCount  = RAY_FLAG_SPECULAR; // Bounce 0, active, primary ray acts as specular for MIS
+    ray.prevBsdfPdf  = 0.0f;
 
     g_RayQueue[rayIndex] = ray;
 }

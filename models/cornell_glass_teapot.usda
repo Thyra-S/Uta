@@ -92,12 +92,12 @@ def Xform "CornellBoxScene"
                 float inputs:base_metalness = 0.0
                 float inputs:specular_weight = 1.0
                 color3f inputs:specular_color = (1.0, 1.0, 1.0)
-                float inputs:specular_roughness = 0.02
-                float inputs:specular_ior = 1.52
+                float inputs:specular_roughness = 0.001
+                float inputs:specular_ior = 1.85
                 float inputs:transmission_weight = 1.0
-                color3f inputs:transmission_color = (0.94, 0.99, 0.97)
+                color3f inputs:transmission_color = (1.0, 1.0, 1.0)
                 float inputs:transmission_depth = 1.0
-                float inputs:transmission_dispersion_abbe_number = 55.0
+                float inputs:transmission_dispersion_abbe_number = 12.0
                 float inputs:transmission_dispersion_scale = 1.0
                 token outputs:out
             }
@@ -183,7 +183,7 @@ def Xform "CornellBoxScene"
             rel material:binding = </CornellBoxScene/Materials/GlassTeapotMat> (
                 bindMaterialAs = "strongerThanDescendants"
             )
-            double3 xformOp:translate = (0.0, 0.0, 0.2)
+            double3 xformOp:translate = (0.0, 0.2, 0.2)
             float3 xformOp:rotateXYZ = (0.0, -25.0, 0.0)
             float3 xformOp:scale = (0.85, 0.85, 0.85)
             uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ", "xformOp:scale"]
